@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "transfer-ui",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["scripts.py", "ui", "--no-browser", "--port", "8765"],
+      "port": 8765
+    }
+  ]
+}

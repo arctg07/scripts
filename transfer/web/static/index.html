@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="transfer-token" content="__TRANSFER_TOKEN__">
+<title>Transfer</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">⇄</span> Transfer</div>
+  <nav class="tabs" role="tablist">
+    <button class="tab" data-tab="copy" role="tab">Копировать</button>
+    <button class="tab" data-tab="apply" role="tab">Применить <span class="count" id="inbox-count" hidden></span></button>
+    <button class="tab" data-tab="history" role="tab">История</button>
+  </nav>
+  <div class="where" id="where"></div>
+</header>
+
+<main>
+  <!-- Копирование -->
+  <section class="view" id="view-copy">
+    <aside class="sidebar">
+      <input type="search" id="project-filter" placeholder="Поиск проекта…" autocomplete="off">
+      <ul class="project-list" id="project-list"></ul>
+    </aside>
+    <div class="content" id="copy-content">
+      <div class="empty">Выберите проект слева</div>
+    </div>
+  </section>
+
+  <!-- Применение -->
+  <section class="view" id="view-apply" hidden>
+    <aside class="sidebar wide">
+      <div class="paste">
+        <textarea id="paste-text" placeholder="Вставьте сюда выгрузку (можно по одной части) и нажмите «В inbox» — или Ctrl+Enter" spellcheck="false"></textarea>
+        <div class="row">
+          <button class="btn primary" id="paste-save">В inbox</button>
+          <button class="btn" id="paste-clipboard" title="Вставить из буфера обмена">Из буфера</button>
+          <label class="btn" title="Добавить файлы выгрузки">Файлы…<input type="file" id="paste-files" multiple hidden></label>
+          <span class="muted small" id="paste-status"></span>
+        </div>
+      </div>
+      <div class="list-head">
+        <h3>Входящие</h3>
+        <button class="btn ghost small" id="inbox-refresh" title="Перечитать inbox">Обновить</button>
+      </div>
+      <ul class="packages" id="packages"></ul>
+      <p class="muted small path" id="inbox-dir"></p>
+    </aside>
+    <div class="content" id="apply-content">
+      <div class="empty">Вставьте выгрузку или выберите пакет из inbox</div>
+    </div>
+  </section>
+
+  <!-- История -->
+  <section class="view" id="view-history" hidden>
+    <div class="content full" id="history-content"></div>
+  </section>
+</main>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true">
+    <h3 id="modal-title"></h3>
+    <div id="modal-body"></div>
+    <div class="row end">
+      <button class="btn" id="modal-cancel">Отмена</button>
+      <button class="btn primary" id="modal-ok">OK</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

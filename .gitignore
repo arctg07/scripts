@@ -1,0 +1,11 @@
+# Рабочие каталоги и настройки конкретной машины
+/inbox/
+/export/
+/backups/
+/config.local.json
+
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.claude/settings.local.json
