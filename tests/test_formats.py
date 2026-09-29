@@ -72,6 +72,22 @@ class PartsTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("обрезана", errors[0]["message"])
 
+    def test_truncated_part_followed_by_next_part(self):
+        parts = parts_for(self.payload)
+        items = scan_all([b"\n".join(parts[1].split(b"\n")[:3]) + b"\n" + parts[2]])
+        self.assertIn("обрезана", [i for i in items if i["type"] == "error"][0]["message"])
+        self.assertEqual([i["header"]["index"] for i in items if i["type"] == "part"], [3])
+
+    def test_header_like_line_in_content(self):
+        # Пример заголовка в README переносимого файла — это содержимое, а не начало новой части.
+        payload = (b"FILE: README.md\n```\n#@transfer v1 kind=changes project=x id=2026-09-25_14-00-00-a1b2 "
+                   b"part=1/3 lines=6999 sha256=\xe2\x80\xa6\n#@transfer v1 kind=changes project=x id=y part=1/1 "
+                   b"lines=500 sha256=" + b"ab" * 32 + b"\n```\n") + self.payload
+        parts = parts_for(payload, max_lines=100)
+        items = scan_all(parts)
+        self.assertEqual([i["type"] for i in items], ["part"])
+        self.assertEqual(formats.assemble_parts(items)[1], payload)
+
     def test_editor_stripped_final_newline(self):
         parts = [p.rstrip(b"\n") for p in parts_for(self.payload)]
         items = scan_all(parts)

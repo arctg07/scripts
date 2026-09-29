@@ -156,15 +156,15 @@ def scan_file(data, source):
             continue
         crlf = line.endswith(b"\r")
         body = lines[i + 1:i + 1 + hdr["lines"]]
+        got = len(body)
+        for k, b in enumerate(body):
+            if b.startswith(HEADER_PREFIX) and _starts_part(lines, i + 1 + k, hdr):
+                got = k
+                break
         if crlf:
             # Транспорт превратил \n в \r\n — возвращаем как было.
             body = [b[:-1] if b.endswith(b"\r") else b for b in body]
-        if len(body) < hdr["lines"] or any(b.startswith(HEADER_PREFIX) for b in body):
-            got = len(body)
-            for k, b in enumerate(body):
-                if b.startswith(HEADER_PREFIX):
-                    got = k
-                    break
+        if got < hdr["lines"]:
             items.append({"type": "error", "source": source, "header": hdr,
                           "message": "часть %d/%d обрезана: ожидалось %d строк, найдено %d" % (
                               hdr["index"], hdr["total"], hdr["lines"], got)})
@@ -176,6 +176,24 @@ def scan_file(data, source):
         items.append({"type": "warning", "source": source,
                       "message": "%s: %d посторонних строк вне частей — пропущены" % (source, junk)})
     return items
+
+
+_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _starts_part(lines, k, hdr):
+    """Строка k внутри тела части hdr — заголовок следующей части (текст обрезан, за ним вставлена другая)?
+
+    В содержимом файлов тоже бывают такие строки (пример заголовка в README), поэтому заголовком
+    считается только корректная строка той же выгрузки или строка, за которой есть всё её тело.
+    """
+    try:
+        other = parse_header(lines[k])
+    except TransferError:
+        return False
+    if other is None or not _SHA_RE.match(other["sha256"]):
+        return False
+    return other["id"] == hdr["id"] or len(lines) - k - 1 >= other["lines"]
 
 
 def _detect_legacy(data, lines, source):
