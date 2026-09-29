@@ -85,7 +85,8 @@ class App(object):
     def state(self, **_):
         return {"version": VERSION, "projects_root": self.cfg.projects_root, "scripts_dir": self.cfg.scripts_dir,
                 "data_dir": self.cfg.data_dir, "inbox_dir": self.cfg.inbox_dir, "export_dir": self.cfg.export_dir,
-                "max_lines": self.cfg.max_lines, "host": socket.gethostname()}
+                "max_lines": self.cfg.max_lines, "history_commits": self.cfg.history_commits,
+                "host": socket.gethostname()}
 
     def list_projects(self, **_):
         return {"projects": projects.list_projects(self.cfg)}
@@ -144,8 +145,10 @@ class App(object):
     # --- Копирование -----------------------------------------------------------------------------
 
     def _copy_args(self, body):
+        history = body.get("history")
         return dict(project=body.get("project"), mode=body.get("mode"), refs=body.get("commits"),
-                    ref=body.get("ref"), with_binaries=_bool(body.get("with_binaries")))
+                    ref=body.get("ref"), with_binaries=_bool(body.get("with_binaries")),
+                    history=None if history in (None, "") else int(history))
 
     def copy_preview(self, body, **_):
         return service.copy_preview(self.cfg, **self._copy_args(body))
@@ -182,7 +185,8 @@ class App(object):
         target = (body.get("target") or "").strip() or None
         return service.apply_package(self.cfg, package, target=target, dry_run=_bool(body.get("dry_run")),
                                      force=_bool(body.get("force")), commit=_bool(body.get("commit")),
-                                     init_git=_bool(body.get("init_git", True)))
+                                     init_git=_bool(body.get("init_git", True)),
+                                     branch=(body.get("branch") or "").strip() or None)
 
     def backups(self, query, **_):
         return {"backups": backup.list_backups(self.cfg, query.get("project") or None)}

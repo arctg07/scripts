@@ -4,5 +4,6 @@
   "port": 8765,
   "hidden_projects": [],
   "aliases": {},
-  "keep_backups": 30
+  "keep_backups": 30,
+  "history_commits": 10
 }

@@ -7,14 +7,20 @@
    Не удаляются: бинарные файлы с пометкой KEEP, настройки IDE (.idea, *.iml, .vscode) и
    локальные настройки Claude Code. Если удалять предстоит подозрительно много файлов (снимок
    другого проекта, не тот target), применение останавливается — продолжить можно с force.
-3) Если проекта нет — он создаётся, после записи выполняются git init и стартовый коммит.
+3) Если проекта нет — он создаётся, после записи выполняются git init и коммиты: история из снимка
+   (см. history.py) или один стартовый коммит.
+4) Для существующего проекта в git можно отвести ветку <имя>-ДД-ММ-ГГ от текущего HEAD: в неё
+   записываются коммиты истории и незакоммиченные правки источника, HEAD переключается на неё.
+   Рабочий каталог при этом уже содержит снимок и не меняется.
 """
 
 import io
+import json
 import os
 import tarfile
+import time
 
-from . import TransferError, fsutil, gitutil, projects
+from . import TransferError, fsutil, gitutil, history, projects
 from .backup import Backup
 from .formats import safe_rel_path
 
@@ -26,7 +32,7 @@ class Snapshot(object):
             members = self.tar.getmembers()
         except (tarfile.TarError, EOFError, OSError) as exc:
             raise TransferError("снимок повреждён или неполный: %s" % exc)
-        self.members = {}
+        self.members, self.extra = {}, {}
         manifest = None
         for m in members:
             name = m.name[2:] if m.name.startswith("./") else m.name
@@ -34,6 +40,8 @@ class Snapshot(object):
                 manifest = m
             elif name.startswith("files/") and (m.isfile() or m.issym() or m.islnk()):
                 self.members[fsutil.nfc(name[6:])] = m
+            elif (name == history.MANIFEST or name.startswith("history/")) and m.isfile():
+                self.extra[name] = m
         if manifest is None:
             raise TransferError("в снимке нет manifest.txt — формат 1 (part_*.txt) не поддерживается, "
                                 "используйте старый project-apply.sh")
@@ -56,7 +64,26 @@ class Snapshot(object):
         for rel in self.files:
             if fsutil.nfc(rel) not in self.members:
                 raise TransferError("в снимке нет файла из манифеста: %s" % rel)
+        self.history = self._read_history()
 
+    def _read_history(self):
+        if history.MANIFEST not in self.extra:
+            return None
+        try:
+            data = json.loads(self.read_extra(history.MANIFEST).decode("utf-8"))
+            if data.get("version") != history.VERSION:
+                return None
+            names = [c["patch"] for c in data["commits"] if "patch" in c] + [data["worktree"]]
+            data["untracked"] = [safe_rel_path(p) for p in data.get("untracked") or []]
+            for c in data["commits"]:
+                if "paths" in c:
+                    c["paths"] = [safe_rel_path(p) for p in c["paths"]]
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise TransferError("история в снимке повреждена: %s" % exc)
+        for name in names:
+            if name not in self.extra:
+                raise TransferError("в снимке нет файла истории: %s" % name)
+        return data
     @property
     def project(self):
         return self.meta.get("PROJECT")
@@ -66,6 +93,9 @@ class Snapshot(object):
 
     def read(self, rel):
         return self.tar.extractfile(self.member(rel)).read()
+
+    def read_extra(self, name):
+        return self.tar.extractfile(self.extra[name]).read()
 
 
 def _state(target, snap, rel):
@@ -94,18 +124,32 @@ def _ancestors(rel):
     return ["/".join(parts[:i]) for i in range(1, len(parts))]
 
 
+def branch_for(target, name):
+    """Имя новой ветки: <name>-ДД-ММ-ГГ, при совпадении с существующей — с суффиксом -2, -3…"""
+    base = "%s-%s" % (name.strip(), time.strftime("%d-%m-%y"))
+    gitutil.check_branch_name(target, base)
+    candidate, n = base, 2
+    while gitutil.branch_exists(target, candidate):
+        candidate = "%s-%d" % (base, n)
+        n += 1
+    return candidate
+
+
 def apply_snapshot(cfg, archive, target_name, dry_run=False, force=False, commit=False, init_git=True,
-                   package_id=None):
+                   package_id=None, branch=None):
+    """branch — имя ветки (без даты) для существующего проекта в git; None — без новой ветки."""
     snap = Snapshot(archive)
     target = projects.project_path(cfg, target_name)
     create = not os.path.isdir(target)
     self_project = not create and projects.is_self(cfg, target)
     expected_nfc = set(fsutil.nfc(p) for p in snap.files + snap.keep)
+    branch = (branch or "").strip() or None
 
     report = {"kind": "snapshot", "project": snap.project, "target": target_name, "path": target,
               "create": create, "dry_run": dry_run, "new": [], "updated": [], "unchanged": 0, "deleted": [],
               "keep": len(snap.keep), "source": snap.meta.get("SOURCE"), "mode": None, "warnings": [],
-              "error": None, "blocked": False, "backup": None, "git": None}
+              "error": None, "blocked": False, "backup": None, "git": None, "branch": None,
+              "history": history.summary(snap.history)}
 
     if create:
         report["new"] = list(snap.files)
@@ -126,6 +170,12 @@ def apply_snapshot(cfg, archive, target_name, dry_run=False, force=False, commit
             if dirty:
                 report["warnings"].append("в проекте есть незакоммиченные изменения (%d) — перед применением "
                                           "делается бэкап затронутых файлов" % dirty)
+
+    if branch and not create:
+        if gitutil.has_own_repo(target) and gitutil.is_work_tree(target):
+            report["branch"] = branch_for(target, branch)
+        else:
+            report["warnings"].append("проект не в собственном git-репозитории — ветка не будет создана")
 
     if snap.project and snap.project != target_name:
         report["warnings"].append("снимок сделан с проекта %s, применяется к %s" % (snap.project, target_name))
@@ -178,24 +228,60 @@ def apply_snapshot(cfg, archive, target_name, dry_run=False, force=False, commit
                 if fsutil.remove_file(target, rel):
                     deleted.append(rel)
         report["deleted"] = sorted(set(deleted))
+
+        try:
+            _git(snap, target, target_name, report, backup, package_id, create, init_git, commit)
+        except gitutil.GitError as exc:
+            report["warnings"].append("git: %s" % exc)
     finally:
         report["backup"] = backup.finish()
+    return report
 
-    # --- git -----------------------------------------------------------------------------------
-    message = "Импорт снимка %s (%s)" % (snap.project or target_name, package_id or "без id")
+
+def _git(snap, target, target_name, report, backup, package_id, create, init_git, commit):
+    label = snap.project or target_name
     if create and init_git and not gitutil.has_own_repo(target):
-        gitutil.init_repo(target, snap.meta.get("BRANCH"))
-        # Для снимка из git все его файлы были в исходном репозитории — добавляются и те, что под .gitignore.
-        forced = snap.files if snap.meta.get("SOURCE") == "git" else None
-        sha, warn = gitutil.commit_all(target, message, force_paths=forced)
-        report["git"] = {"init": True, "commit": sha, "branch": snap.meta.get("BRANCH")}
-        if warn:
-            report["warnings"].append(warn)
+        branch = snap.meta.get("BRANCH")
+        gitutil.init_repo(target, branch)
+        report["git"] = {"init": True, "commit": None, "branch": branch, "commits": []}
+        if not snap.history:
+            # Для снимка из git все его файлы были в исходном репозитории — добавляются и те, что под .gitignore.
+            forced = snap.files if snap.meta.get("SOURCE") == "git" else None
+            sha, warn = gitutil.commit_all(target, "Импорт снимка %s (%s)" % (label, package_id or "без id"),
+                                           force_paths=forced)
+            report["git"]["commit"] = sha
+            if warn:
+                report["warnings"].append(warn)
+            return
+        result = history.commit_snapshot(target, snap, None, label, package_id)
+        report["warnings"] += result["warnings"]
+        if result["tip"]:
+            gitutil.run_git(target, ["update-ref", "HEAD", result["tip"]])
+            gitutil.run_git(target, ["reset", "-q"])
+        report["git"].update(commit=result["tip"], commits=result["commits"])
+    elif report["branch"]:
+        head = gitutil.resolve_commit(target, "HEAD")
+        result = history.commit_snapshot(target, snap, head, label, package_id)
+        report["warnings"] += result["warnings"]
+        report["git"] = {"init": False, "commit": None, "branch": None, "commits": result["commits"],
+                         "reused": result["reused"]}
+        if result["tip"] == head:
+            report["warnings"].append("коммитить нечего: проект уже совпадает со снимком — ветка %s не создана"
+                                      % report["branch"])
+            return
+        name = report["branch"]
+        code, out, _ = gitutil.run_git(target, ["symbolic-ref", "-q", "HEAD"], check=False)
+        prev_ref = out.decode("utf-8", "replace").strip() if code == 0 else None
+        gitutil.run_git(target, ["update-ref", "refs/heads/" + name, result["tip"], gitutil.ZERO_SHA])
+        gitutil.run_git(target, ["symbolic-ref", "HEAD", "refs/heads/" + name])
+        # Индекс — по новой вершине; рабочий каталог уже содержит снимок и не трогается.
+        gitutil.run_git(target, ["reset", "-q"])
+        report["git"].update(commit=result["tip"], branch=name)
+        backup.meta["git"] = {"branch": "refs/heads/" + name, "tip": result["tip"], "prev_ref": prev_ref,
+                              "prev_head": head}
     elif commit and not create and gitutil.is_work_tree(target):
         touched = report["new"] + report["updated"] + report["deleted"]
-        sha, warn = gitutil.commit_paths(target, touched, "Применён снимок %s (%s)" % (
-            snap.project or target_name, package_id or "без id"))
+        sha, warn = gitutil.commit_paths(target, touched, "Применён снимок %s (%s)" % (label, package_id or "без id"))
         report["git"] = {"init": False, "commit": sha}
         if warn:
             report["warnings"].append(warn)
-    return report

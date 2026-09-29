@@ -9,7 +9,7 @@ import re
 import shutil
 import time
 
-from . import TransferError, formats, projects
+from . import TransferError, formats, history, projects
 
 APPLIED = "applied"
 DISCARDED = "discarded"
@@ -125,6 +125,8 @@ def summarize(cfg, p, verify=True):
                 snap = Snapshot(data)
                 info["project"] = info["project"] or snap.project
                 info["snapshot_files"] = len(snap.files)
+                info["snapshot_branch"] = snap.meta.get("BRANCH")
+                info["commits"] = history.summary(snap.history)
             else:
                 parsed = formats.parse_changes(data)
                 info["project"] = info["project"] or parsed["meta"]["project"]

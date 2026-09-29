@@ -8,17 +8,18 @@ from . import TransferError, git_apply, git_copy, gitutil, inbox, project_apply,
 LOCK = threading.Lock()
 
 
-def copy(cfg, project, mode, refs=None, ref=None, with_binaries=False):
-    """mode: last — последний коммит ветки ref; commits — выбранные refs; project — снимок целиком."""
+def copy(cfg, project, mode, refs=None, ref=None, with_binaries=False, history=None):
+    """mode: last — последний коммит ветки ref; commits — выбранные refs; project — снимок целиком
+    (history — сколько последних коммитов добавить, None — из настроек)."""
     with LOCK:
         if mode == "project":
-            return project_copy.copy_project(cfg, project, with_binaries)
+            return project_copy.copy_project(cfg, project, with_binaries, history)
         return git_copy.copy_commits(cfg, project, _refs(mode, refs, ref))
 
 
-def copy_preview(cfg, project, mode, refs=None, ref=None, with_binaries=False):
+def copy_preview(cfg, project, mode, refs=None, ref=None, with_binaries=False, history=None):
     if mode == "project":
-        return project_copy.preview(cfg, project, with_binaries)
+        return project_copy.preview(cfg, project, with_binaries, history)
     repo = projects.existing_project(cfg, project)
     if not gitutil.is_work_tree(repo):
         raise TransferError("проект %s — не git-репозиторий" % project)
@@ -39,8 +40,11 @@ def _refs(mode, refs, ref):
 
 
 def apply_package(cfg, package, target=None, dry_run=False, force=False, commit=False, init_git=True,
-                  archive_after=True):
-    """Применяет пакет inbox/файлов. target — имя локального проекта (по умолчанию из выгрузки)."""
+                  archive_after=True, branch=None):
+    """Применяет пакет inbox/файлов. target — имя локального проекта (по умолчанию из выгрузки).
+
+    branch — для снимка: отвести от HEAD ветку <branch>-ДД-ММ-ГГ и записать в неё историю из снимка.
+    """
     kind, data = inbox.payload(package)
     source_project = package.get("project")
     if not target:
@@ -57,7 +61,7 @@ def apply_package(cfg, package, target=None, dry_run=False, force=False, commit=
     with LOCK:
         if kind == "snapshot":
             report = project_apply.apply_snapshot(cfg, data, target, dry_run=dry_run, force=force, commit=commit,
-                                                  init_git=init_git, package_id=package.get("id"))
+                                                  init_git=init_git, package_id=package.get("id"), branch=branch)
         else:
             report = git_apply.apply_changes(cfg, data, target, dry_run=dry_run, commit=commit,
                                              package_id=package.get("id"))

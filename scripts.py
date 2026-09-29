@@ -3,10 +3,10 @@
 
   scripts.py projects                                   список проектов в корне
   scripts.py git-copy <проект> [ref ...]                выгрузка коммитов (без ref — HEAD)
-  scripts.py project-copy <проект> [--with-binaries]    снимок проекта целиком
+  scripts.py project-copy <проект> [--with-binaries] [--history N]   снимок проекта целиком
   scripts.py inbox                                      что лежит во входящих
   scripts.py git-apply [файлы] [--project X] [--dry-run] [--commit]
-  scripts.py project-apply [файлы] [--project X] [--dry-run] [--force] [--commit] [--no-git]
+  scripts.py project-apply [файлы] [--project X] [--dry-run] [--force] [--commit] [--no-git] [--branch ИМЯ]
   scripts.py backups [проект] / restore <id>            бэкапы перед применением и откат
   scripts.py ui [--port N] [--no-browser]               веб-интерфейс
 """
@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from transfer import TransferError, backup, inbox, projects, service  # noqa: E402
-from transfer.config import load_config  # noqa: E402
+from transfer.config import DEFAULTS, load_config  # noqa: E402
 
 
 def human_size(n):
@@ -59,9 +59,13 @@ def cmd_git_copy(cfg, args):
 
 
 def cmd_project_copy(cfg, args):
-    result = service.copy(cfg, args.project, "project", with_binaries=args.with_binaries)
+    result = service.copy(cfg, args.project, "project", with_binaries=args.with_binaries, history=args.history)
     for w in result["warnings"]:
         print("WARN: " + w, file=sys.stderr)
+    if result["history"]:
+        print("История (%d коммитов):" % len(result["history"]))
+        for c in result["history"]:
+            print("  %s %s" % (c["sha"], c["subject"]))
     if result["keep"]:
         print("Бинарные файлы НЕ перенесены (%d, для переноса — --with-binaries):" % len(result["keep"]))
         for rel in result["keep"]:
@@ -131,9 +135,18 @@ def print_report(report):
         (", отсутствовало: %d" % len(report["absent"])) if report.get("absent") else "", report["path"]))
     if report.get("backup"):
         print("Бэкап: %s (откат: ./scripts.py restore %s)" % (report["backup"], report["backup"]))
+    if report["dry_run"]:
+        if report.get("branch"):
+            print("Будет создана ветка %s" % report["branch"])
+        if report.get("history"):
+            print("История в снимке: %d коммитов" % len(report["history"]))
     git = report.get("git")
+    for c in (git or {}).get("commits") or []:
+        print("COMMIT:  %s %s" % (c["short"], c["subject"]))
     if git and git.get("commit"):
-        print("git: %s%s" % ("init, " if git.get("init") else "", "коммит " + git["commit"][:10]))
+        print("git: %s%s%s" % ("init, " if git.get("init") else "",
+                               ("ветка %s, " % git["branch"]) if git.get("branch") else "",
+                               "коммит " + git["commit"][:10]))
     if report.get("error"):
         print("ОШИБКА: " + report["error"], file=sys.stderr)
         return 1
@@ -149,7 +162,8 @@ def cmd_apply(kind):
                 pkg_kind, kind, "project-apply" if pkg_kind == "snapshot" else "git-apply"))
         report = service.apply_package(
             cfg, package, target=args.project, dry_run=args.dry_run, force=getattr(args, "force", False),
-            commit=args.commit, init_git=not getattr(args, "no_git", False), archive_after=from_inbox)
+            commit=args.commit, init_git=not getattr(args, "no_git", False), archive_after=from_inbox,
+            branch=getattr(args, "branch", None))
         return print_report(report)
     return run
 
@@ -173,6 +187,8 @@ def cmd_restore(cfg, args):
         print("RESTORED: " + rel)
     print("Откат выполнен: удалено %d, восстановлено %d (%s)" % (
         len(result["removed"]), len(result["restored"]), result["target"]))
+    if result.get("git"):
+        print("git: " + result["git"])
 
 
 def cmd_ui(cfg, args):
@@ -197,6 +213,9 @@ def build_parser():
     p = sub.add_parser("project-copy", help="снимок проекта")
     p.add_argument("project")
     p.add_argument("--with-binaries", action="store_true", help="переносить и бинарные файлы")
+    p.add_argument("--history", type=int, metavar="N",
+                   help="сколько последних коммитов добавить в снимок (0 — без истории; по умолчанию %d)"
+                        % DEFAULTS["history_commits"])
     p.set_defaults(func=cmd_project_copy)
 
     p = sub.add_parser("inbox", help="входящие выгрузки")
@@ -212,6 +231,8 @@ def build_parser():
         if kind == "snapshot":
             p.add_argument("--force", action="store_true", help="удалять, даже если неактуальных файлов много")
             p.add_argument("--no-git", action="store_true", help="для нового проекта не делать git init")
+            p.add_argument("--branch", metavar="ИМЯ",
+                           help="отвести от HEAD ветку ИМЯ-ДД-ММ-ГГ и записать в неё историю коммитов из снимка")
         p.set_defaults(func=cmd_apply(kind))
 
     p = sub.add_parser("backups", help="список бэкапов")

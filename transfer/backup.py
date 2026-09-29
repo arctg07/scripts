@@ -10,7 +10,7 @@ import os
 import shutil
 import time
 
-from . import TransferError, fsutil, projects
+from . import TransferError, fsutil, gitutil, projects
 from .formats import new_package_id, safe_file_part
 
 
@@ -146,7 +146,31 @@ def restore(cfg, backup_id):
         else:
             continue
         restored.append(rel)
+    git_note = _restore_git(target, meta["git"]) if meta.get("git") else None
     meta["restored_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     _write_meta(path, meta)
     return {"id": backup_id, "project": meta["project"], "target": target,
-            "removed": removed, "restored": restored}
+            "removed": removed, "restored": restored, "git": git_note}
+
+
+def _restore_git(target, info):
+    """Возвращает HEAD и индекс на место, если применение переключило проект на новую ветку.
+
+    Сама ветка остаётся (удалить: git branch -D <ветка>).
+    """
+    branch = info["branch"]
+    short = branch.replace("refs/heads/", "", 1)
+    code, out, _ = gitutil.run_git(target, ["symbolic-ref", "-q", "HEAD"], check=False)
+    current = out.decode("utf-8", "replace").strip() if code == 0 else None
+    if current != branch or gitutil.resolve_commit(target, "HEAD") != info["tip"]:
+        return "HEAD уже не на ветке %s в состоянии после применения — git не менялся" % short
+    if info.get("prev_ref"):
+        gitutil.run_git(target, ["symbolic-ref", "HEAD", info["prev_ref"]])
+    else:
+        gitutil.run_git(target, ["update-ref", "--no-deref", "HEAD", info["prev_head"]])
+    if info.get("prev_head"):
+        gitutil.run_git(target, ["reset", "-q"])
+    else:
+        gitutil.run_git(target, ["read-tree", "--empty"])
+    prev = (info.get("prev_ref") or "").replace("refs/heads/", "", 1) or (info.get("prev_head") or "")[:10]
+    return "HEAD возвращён на %s; ветка %s оставлена (удалить: git branch -D %s)" % (prev, short, short)

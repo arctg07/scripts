@@ -172,7 +172,13 @@ const cp = {
   filter: '', project: null, info: null, mode: 'commits', branches: [], branch: null,
   commits: [], more: false, q: '', loading: false, selected: new Map(), anchor: null,
   expanded: new Map(), preview: null, previewSig: null, result: null, withBinaries: false, busy: false, exports: [],
+  history: null,
 };
+
+function historyLimit() {
+  if (cp.history === null) cp.history = store.get('history', app.state ? app.state.history_commits : 10);
+  return cp.history;
+}
 
 async function loadProjects() {
   const data = await api('GET', '/api/projects');
@@ -252,6 +258,7 @@ async function setMode(mode) {
 function copyRequest() {
   const body = { project: cp.project, mode: cp.mode, ref: cp.branch, with_binaries: cp.withBinaries };
   if (cp.mode === 'commits') body.commits = [...cp.selected.keys()];
+  if (cp.mode === 'project') body.history = cp.info && cp.info.git ? historyLimit() : 0;
   return body;
 }
 
@@ -357,6 +364,15 @@ function renderProjectMode() {
     h('label', { class: 'check' }, h('input', {
       type: 'checkbox', checked: cp.withBinaries, onchange: (e) => { cp.withBinaries = e.target.checked; cp.preview = null; renderCopy(); },
     }), 'Переносить бинарные файлы (jar, картинки, keystore)'),
+    cp.info.git ? h('label', { class: 'check', title: 'Изменения последних коммитов текущей ветки: при применении они воссоздаются как отдельные коммиты с теми же авторами, датами и сообщениями' },
+      'История: последние',
+      h('input', {
+        type: 'number', min: 0, max: 1000, class: 'num', value: historyLimit(),
+        onchange: (e) => {
+          cp.history = Math.max(0, Math.min(1000, parseInt(e.target.value, 10) || 0));
+          store.set('history', cp.history); cp.preview = null; renderCopy();
+        },
+      }), plural(historyLimit(), 'коммит', 'коммита', 'коммитов'), historyLimit() ? '' : ' (без истории)') : null,
     h('div', { class: 'row', style: 'margin-top:12px' }, actionButtons()));
 }
 
@@ -461,7 +477,9 @@ function renderPreview() {
       h('div', { class: 'summary' },
         h('div', { class: 'stat' }, h('b', null, p.files), h('span', null, 'файлов')),
         h('div', { class: 'stat' }, h('b', null, fmtSize(p.bytes)), h('span', null, 'объём')),
-        h('div', { class: 'stat' }, h('b', null, p.keep.length), h('span', null, 'бинарных не переносится'))),
+        h('div', { class: 'stat' }, h('b', null, p.keep.length), h('span', null, 'бинарных не переносится')),
+        h('div', { class: 'stat' }, h('b', null, p.history.length), h('span', null, 'коммитов истории'))),
+      historyList(p.history),
       listDetails('Бинарные — остаются как есть (KEEP)', p.keep, 'KEEP'),
       h('details', null, h('summary', null, `Файлы снимка (${p.files})`), fileList(p.file_list, 'A')));
   }
@@ -491,6 +509,14 @@ function renderPreview() {
       p.commits.map((c) => h('li', null, h('span', { class: 'mono hash-inline' }, c.short), c.subject)))));
 }
 
+function historyList(commits, title) {
+  if (!commits || !commits.length) return null;
+  return h('details', { open: commits.length <= 15 }, h('summary', null, `${title || 'История'} (${commits.length})`),
+    h('ul', { class: 'file-list' }, commits.map((c) => h('li', null,
+      h('span', { class: 'mono hash-inline' }, (c.short || c.sha || '').slice(0, 10)), c.subject,
+      c.author ? h('span', { class: 'muted small' }, ` — ${c.author}${c.time ? ', ' + fmtDate(c.time) : ''}`) : null))));
+}
+
 // Тексты частей загружаются заранее, чтобы копирование шло прямо в обработчике клика.
 const partCache = new Map();
 
@@ -508,7 +534,7 @@ function renderExports() {
       h('span', { class: 'muted small path' }, cp.exports[0].path.replace(/[^/\\]+$/, ''))),
     res ? h('div', { class: 'alert ok' },
       res.kind === 'snapshot'
-        ? `Снимок: ${res.files} файлов (${fmtSize(res.bytes)}), архив ${fmtSize(res.archive_bytes)}.`
+        ? `Снимок: ${res.files} файлов (${fmtSize(res.bytes)}), история: ${res.history.length} ${plural(res.history.length, 'коммит', 'коммита', 'коммитов')}, архив ${fmtSize(res.archive_bytes)}.`
         : `Коммитов: ${res.commits.length}, файлов: ${res.files}, удалений: ${res.deleted}.`,
       ' Скопируйте каждую часть и вставьте на другой машине во вкладке «Применить».') : null,
     [...groups.values()].map((g) => h('div', { style: 'margin-top:8px' },
@@ -546,7 +572,16 @@ function renderExports() {
 
 /* ---------- Применение ---------- */
 
-const ap = { packages: [], key: null, target: '', report: null, reportSig: null, commit: false, initGit: true, force: false, busy: false, last: null };
+const ap = {
+  packages: [], key: null, target: '', report: null, reportSig: null, commit: false, initGit: true, force: false, busy: false, last: null,
+  useBranch: true, branchName: '',
+};
+
+function todaySuffix() {
+  const d = new Date();
+  const p = (x) => String(x).padStart(2, '0');
+  return `-${p(d.getDate())}-${p(d.getMonth() + 1)}-${String(d.getFullYear()).slice(2)}`;
+}
 
 async function loadInbox(selectFile) {
   try {
@@ -606,6 +641,8 @@ function selectPackage(key, keepReport) {
     ap.target = p.local_project || p.project || '';
     if (!keepReport) ap.last = null;
     ap.report = null; ap.force = false; ap.commit = false; ap.initGit = true;
+    ap.useBranch = store.get('useBranch', true);
+    ap.branchName = store.get('branchName', '') || p.snapshot_branch || 'import';
   }
   renderPackages();
   renderApply();
@@ -613,8 +650,14 @@ function selectPackage(key, keepReport) {
 
 function currentPackage() { return ap.packages.find((p) => p.key === ap.key) || null; }
 function targetExists(name) { return app.projects.some((p) => p.name === name); }
+function targetHasGit(name) { return app.projects.some((p) => p.name === name && p.git); }
+function branchApplies() {
+  const p = currentPackage();
+  return !!p && p.kind === 'snapshot' && targetHasGit(ap.target) && ap.useBranch;
+}
 function applyRequest(dry) {
-  return { key: ap.key, target: ap.target, dry_run: dry, force: ap.force, commit: ap.commit, init_git: ap.initGit };
+  const branch = branchApplies() ? ap.branchName.trim() : '';
+  return { key: ap.key, target: ap.target, dry_run: dry, force: ap.force, commit: ap.commit && !branch, init_git: ap.initGit, branch };
 }
 function applySig() { return JSON.stringify(applyRequest(true)); }
 
@@ -637,7 +680,7 @@ function renderApply() {
     h('dt', null, 'Файлы в inbox'), h('dd', { class: 'mono small' }, p.files.join(', ')),
     p.kind === 'snapshot' && p.snapshot_files !== undefined ? [h('dt', null, 'Содержимое'), h('dd', null, `${p.snapshot_files} файлов`)] : null,
     p.kind === 'changes' && p.changes_files !== undefined ? [h('dt', null, 'Содержимое'), h('dd', null, `${p.changes_files} файлов, удалений: ${p.changes_deleted}`)] : null,
-    p.commits && p.commits.length ? [h('dt', null, 'Коммиты'), h('dd', null, h('ul', { class: 'file-list' },
+    p.commits && p.commits.length ? [h('dt', null, p.kind === 'snapshot' ? 'История' : 'Коммиты'), h('dd', null, h('ul', { class: 'file-list' },
       p.commits.map((c) => h('li', null, h('span', { class: 'mono hash-inline' }, c.sha), c.subject))))] : null);
 
   const datalist = h('datalist', { id: 'project-names' }, app.projects.map((x) => h('option', { value: x.name })));
@@ -681,12 +724,31 @@ function renderApplyTail() {
   const cb = (label, key, title) => h('label', { class: 'check', title: title || '' }, h('input', {
     type: 'checkbox', checked: ap[key], onchange: (e) => { ap[key] = e.target.checked; ap.report = null; renderApplyTail(); },
   }), label);
+  const withBranch = branchApplies();
+  let branchRow = null;
+  if (p.kind === 'snapshot' && targetHasGit(ap.target)) {
+    const nameInput = h('input', { type: 'text', value: ap.branchName, placeholder: 'имя ветки', 'aria-label': 'Имя ветки', disabled: !ap.useBranch });
+    nameInput.addEventListener('input', () => {
+      ap.branchName = nameInput.value; store.set('branchName', ap.branchName.trim()); ap.report = null;
+      $('#branch-full').textContent = (ap.branchName.trim() || '…') + todaySuffix();
+      const rep = $('#apply-report'); if (rep && !ap.last) fill(rep);
+      document.querySelectorAll('#apply-actions button').forEach((b) => { b.disabled = ap.busy || !ap.branchName.trim(); });
+    });
+    branchRow = h('div', { class: 'branch-row' },
+      h('label', { class: 'check', title: 'Ветка отводится от текущего HEAD; в неё записываются коммиты истории из снимка и незакоммиченные правки источника' },
+        h('input', {
+          type: 'checkbox', checked: ap.useBranch,
+          onchange: (e) => { ap.useBranch = e.target.checked; store.set('useBranch', ap.useBranch); ap.report = null; renderApplyTail(); },
+        }), 'Отвести ветку'),
+      nameInput, h('span', { class: 'muted small' }, '→ ', h('code', { id: 'branch-full' }, (ap.branchName.trim() || '…') + todaySuffix())));
+  }
   fill(opts,
-    p.kind === 'snapshot' && !exists ? cb('git init + стартовый коммит', 'initGit') : null,
-    exists ? cb('Закоммитить после применения', 'commit', 'коммит только применённых файлов; если в индексе уже что-то есть — коммит не создаётся') : null,
+    branchRow,
+    p.kind === 'snapshot' && !exists ? cb('git init + стартовый коммит', 'initGit', 'история из снимка попадёт в ветку источника') : null,
+    exists && !withBranch ? cb('Закоммитить после применения', 'commit', 'коммит только применённых файлов; если в индексе уже что-то есть — коммит не создаётся') : null,
     p.kind === 'snapshot' && exists ? cb('Удалять, даже если файлов много (force)', 'force', 'защита от применения снимка не к тому проекту') : null);
 
-  const canRun = ap.target && (exists || p.kind === 'snapshot') && !ap.busy;
+  const canRun = ap.target && (exists || p.kind === 'snapshot') && !ap.busy && !(withBranch && !ap.branchName.trim());
   fill($('#apply-actions'),
     h('button', { class: 'btn', disabled: !canRun, onclick: () => runApply(true) }, ap.busy ? spinner() : null, 'Предпросмотр'),
     h('button', { class: 'btn primary', disabled: !canRun, onclick: () => runApply(false) }, 'Применить'));
@@ -716,6 +778,7 @@ async function runApply(dry) {
         h('div', { class: 'stat UPDATED' }, h('b', null, preview.updated.length), h('span', null, 'изменить')),
         h('div', { class: 'stat DELETE' }, h('b', null, preview.deleted.length), h('span', null, 'удалить'))),
       preview.warnings.length ? h('div', { class: 'alert warn' }, h('ul', null, preview.warnings.map((w) => h('li', null, w)))) : null,
+      preview.branch ? h('p', null, 'Ветка ', h('code', null, preview.branch), ` от текущего HEAD, история: ${preview.history.length} ${plural(preview.history.length, 'коммит', 'коммита', 'коммитов')}.`) : null,
       !preview.create ? h('p', { class: 'muted small' }, 'Перед изменением делается бэкап — откатить можно во вкладке «История».') : null);
     ap.busy = false; renderApplyTail();
     if (!await modal('Применить выгрузку?', body, 'Применить', preview.deleted.length > 0)) return;
@@ -758,7 +821,12 @@ function renderReport(r, applied) {
     listDetails(dry ? 'Будут удалены' : 'Удалённые', r.deleted, 'DELETE', true),
     listDetails('Уже отсутствовали', r.absent, 'D'),
     !dry && r.backup ? h('p', { class: 'muted small' }, `Бэкап: ${r.backup} — откат во вкладке «История».`) : null,
-    !dry && r.git && r.git.commit ? h('p', { class: 'muted small' }, `git: ${r.git.init ? 'init, ' : ''}коммит ${r.git.commit.slice(0, 10)}`) : null,
+    dry && r.branch ? h('div', { class: 'alert ok' }, 'Будет создана ветка ', h('code', null, r.branch), ' — HEAD переключится на неё.') : null,
+    dry ? historyList(r.history, 'История в снимке') : null,
+    !dry && r.git && r.git.branch ? h('div', { class: 'alert ok' }, 'Создана ветка ', h('code', null, r.git.branch), ', HEAD переключён на неё.') : null,
+    !dry && r.git && r.git.commit ? h('p', { class: 'muted small' }, `git: ${r.git.init ? 'init, ' : ''}коммит ${r.git.commit.slice(0, 10)}`
+      + (r.git.reused ? `, уже было в проекте: ${r.git.reused} ${plural(r.git.reused, 'коммит', 'коммита', 'коммитов')}` : '')) : null,
+    !dry && r.git ? historyList([...(r.git.commits || [])].reverse(), 'Созданные коммиты') : null,
     applied && r.archived ? h('p', { class: 'muted small' }, 'Файлы выгрузки перенесены в inbox/applied.') : null);
 }
 
@@ -850,11 +918,12 @@ async function restoreBackup(b) {
       h('li', null, `удалить созданные файлы: ${b.counts.created}`),
       h('li', null, `вернуть прежние версии: ${b.counts.modified + b.counts.deleted}`)),
     h('div', { class: 'alert warn' }, 'Правки этих файлов, сделанные после применения, будут потеряны. '
-      + 'Откатываются только файлы: коммит, созданный при применении, остаётся в git.'));
+      + (b.git ? `HEAD вернётся на прежнюю ветку, ветка ${b.git.branch.replace('refs/heads/', '')} останется в git.`
+        : 'Откатываются только файлы: коммит, созданный при применении, остаётся в git.')));
   if (!await modal('Откатить применение?', body, 'Откатить', true)) return;
   try {
     const r = await api('POST', '/api/backups/restore', { id: b.id });
-    toast(`Откат: удалено ${r.removed.length}, восстановлено ${r.restored.length}`);
+    toast(`Откат: удалено ${r.removed.length}, восстановлено ${r.restored.length}` + (r.git ? '. ' + r.git : ''));
     loadHistory();
   } catch (e) {
     toast(e.message, true);

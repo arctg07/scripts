@@ -25,6 +25,8 @@ DEFAULTS = {
     "aliases": {},
     # Сколько последних бэкапов хранить на проект.
     "keep_backups": 30,
+    # Сколько последних коммитов добавлять в снимок проекта (0 — без истории).
+    "history_commits": 10,
 }
 
 
@@ -42,6 +44,8 @@ class Config(object):
         self.hidden_projects = set(data.get("hidden_projects") or [])
         self.aliases = dict(data.get("aliases") or {})
         self.keep_backups = max(1, int(data.get("keep_backups") or DEFAULTS["keep_backups"]))
+        history = data.get("history_commits")
+        self.history_commits = max(0, int(DEFAULTS["history_commits"] if history is None else history))
 
     def local_name(self, project):
         """Имя локального проекта для имени из выгрузки (с учётом aliases)."""

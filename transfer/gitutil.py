@@ -2,7 +2,9 @@
 
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 
 from . import TransferError
 
@@ -14,12 +16,12 @@ class GitError(TransferError):
     pass
 
 
-def run_git(cwd, args, input=None, check=True):
+def run_git(cwd, args, input=None, check=True, env=None):
     """Запускает git и возвращает (код, stdout, stderr) в байтах."""
     cmd = ["git", "-c", "core.quotepath=off"] + list(args)
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     except OSError as exc:
         raise GitError("не удалось запустить git: %s" % exc)
     out, err = proc.communicate(input)
@@ -293,3 +295,140 @@ def commit_all(repo, message, force_paths=None):
         return None, "файлов для коммита нет"
     run_git(repo, ["commit", "-q", "-m", message])
     return git_str(repo, "rev-parse", "HEAD"), None
+
+
+# --- История для снимка --------------------------------------------------------------------------
+
+def empty_tree(repo):
+    return git_str(repo, "hash-object", "-t", "tree", "--stdin", input=b"")
+
+
+def tree_of(repo, rev):
+    return git_str(repo, "rev-parse", rev + "^{tree}")
+
+
+def first_parent_history(repo, limit):
+    """Последние limit коммитов HEAD по первому родителю, от старых к новым."""
+    return list(reversed(rev_list(repo, "--first-parent", "-n", str(int(limit)), "HEAD")))
+
+
+def first_parent(repo, sha):
+    parents = git_str(repo, "rev-list", "--parents", "-n", "1", sha).split()[1:]
+    return parents[0] if parents else None
+
+
+def commit_meta(repo, sha):
+    """Автор, коммиттер (имя, почта, дата в формате raw) и полное сообщение коммита."""
+    raw = git(repo, "log", "-1", "--date=raw", "--format=%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd%x00%B", sha, "--")
+    fields = raw.decode("utf-8", "replace").split("\x00", 6)
+    return {"author": fields[0:3], "committer": fields[3:6], "message": fields[6].rstrip("\n") + "\n"}
+
+
+def ls_tree_paths(repo, rev):
+    out = git(repo, "ls-tree", "-r", "-z", "--name-only", rev)
+    return [os.fsdecode(p) for p in out.split(b"\x00") if p]
+
+
+_DIFF_OPTS = ["--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=all",
+              "--src-prefix=a/", "--dst-prefix=b/"]
+
+
+def diff_numstat(repo, old, new=None):
+    """Пути, изменённые между old и new (None — рабочий каталог): [(путь, бинарный)]."""
+    args = ["diff", "--numstat", "-z"] + _DIFF_OPTS + [old] + ([new] if new else []) + ["--"]
+    result = []
+    for rec in git(repo, *args).split(b"\x00"):
+        if not rec:
+            continue
+        added, deleted, path = rec.split(b"\t", 2)
+        result.append((os.fsdecode(path), added == b"-" and deleted == b"-"))
+    return result
+
+
+def diff_patch(repo, old, new=None, exclude=()):
+    """Патч для git apply (с бинарными данными и полными хешами); exclude — пути, которые в него не попадают."""
+    args = ["diff", "--binary", "--full-index"] + _DIFF_OPTS + [old] + ([new] if new else []) + ["--", "."]
+    args += [":(exclude,literal)" + p for p in sorted(exclude)]
+    return git(repo, *args)
+
+
+def check_branch_name(repo, name):
+    code, out, _ = run_git(repo, ["check-ref-format", "--branch", name], check=False)
+    if code != 0 or not name or name.startswith("-"):
+        raise GitError("некорректное имя ветки: %s" % name)
+    return out.decode("utf-8", "replace").strip()
+
+
+def branch_exists(repo, name):
+    return run_git(repo, ["show-ref", "--verify", "--quiet", "refs/heads/" + name], check=False)[0] == 0
+
+
+def local_identity(repo):
+    """(имя, почта) из настроек git или None."""
+    values = []
+    for key in ("user.name", "user.email"):
+        code, out, _ = run_git(repo, ["config", key], check=False)
+        if code != 0 or not out.strip():
+            return None
+        values.append(out.decode("utf-8", "replace").strip())
+    return tuple(values)
+
+
+def commit_tree(repo, tree, parents, message, author, committer=None):
+    """Коммит из готового дерева. author/committer — (имя, почта[, дата])."""
+    env = dict(os.environ)
+    for prefix, ident in (("GIT_AUTHOR_", author), ("GIT_COMMITTER_", committer or author)):
+        env[prefix + "NAME"], env[prefix + "EMAIL"] = ident[0], ident[1]
+        if len(ident) > 2 and ident[2]:
+            env[prefix + "DATE"] = ident[2]
+        else:
+            env.pop(prefix + "DATE", None)
+    args = ["commit-tree", tree]
+    for p in parents:
+        args += ["-p", p]
+    out = run_git(repo, args + ["-F", "-"], input=message.encode("utf-8"), env=env)[1]
+    return out.decode().strip()
+
+
+class TempIndex(object):
+    """Отдельный индекс git: деревья собираются, не трогая ни рабочий каталог, ни основной индекс."""
+
+    def __init__(self, repo):
+        self.repo = repo
+        self.dir = tempfile.mkdtemp(prefix="transfer-index-")
+        self.env = dict(os.environ, GIT_INDEX_FILE=os.path.join(self.dir, "index"))
+
+    def run(self, args, input=None, check=True):
+        return run_git(self.repo, args, input=input, check=check, env=self.env)
+
+    def read_tree(self, tree):
+        self.run(["read-tree", tree] if tree else ["read-tree", "--empty"])
+
+    def write_tree(self):
+        return self.run(["write-tree"])[1].decode().strip()
+
+    def update_from_disk(self, paths):
+        """Пути берутся с диска (даже под .gitignore); отсутствующие на диске убираются из индекса."""
+        data = b"".join(os.fsencode(p) + b"\x00" for p in paths)
+        if data:
+            self.run(["update-index", "--add", "--remove", "--replace", "-z", "--stdin"], input=data)
+
+    def remove(self, paths):
+        data = b"".join(os.fsencode(p) + b"\x00" for p in paths)
+        if data:
+            self.run(["update-index", "--force-remove", "-z", "--stdin"], input=data)
+
+    def apply(self, patch, reverse=False):
+        if not patch.strip():
+            return True
+        args = ["apply", "--cached", "--whitespace=nowarn"] + (["-R"] if reverse else []) + ["-"]
+        return self.run(args, input=patch, check=False)[0] == 0
+
+    def close(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()

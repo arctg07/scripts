@@ -106,7 +106,7 @@ main { flex: 1; min-height: 0; }
 .empty { color: var(--muted); padding: 40px 0; text-align: center; }
 
 /* --- Элементы управления --- */
-input[type="search"], input[type="text"], select, textarea {
+input[type="search"], input[type="text"], input[type="number"], select, textarea {
   font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border);
   border-radius: 8px; padding: 7px 10px; outline: none;
 }
@@ -221,6 +221,9 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent);
 .target-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
 .target-row input { min-width: 260px; }
 .options { display: flex; gap: 18px; flex-wrap: wrap; margin: 10px 0 14px; }
+.branch-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-basis: 100%; }
+.branch-row input[type=text] { min-width: 200px; }
+input.num { width: 64px; }
 
 .summary { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 10px; }
 .stat { border: 1px solid var(--border); border-radius: 10px; padding: 8px 14px; min-width: 110px; background: var(--panel); }
