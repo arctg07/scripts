@@ -547,7 +547,7 @@ function renderExports() {
             partCache.set(key, api('GET', `/api/export/${encodeURIComponent(f.project_dir)}/${encodeURIComponent(f.name)}`)
               .then((text) => { partCache.set(key, text); return text; }, (e) => { partCache.delete(key); throw e; }));
           }
-          return partCache.get(key);
+          return Promise.resolve(partCache.get(key)); // в кэше уже может лежать готовая строка
         };
         load().catch(() => {});
         const btn = h('button', { class: 'btn small' }, 'Копировать');
