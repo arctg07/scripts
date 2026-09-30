@@ -129,6 +129,28 @@ class SnapshotTest(TempEnv):
         self.assertEqual(sorted(tree(os.path.join(self.root, "plain-copy"))), ["src/A.java", "src/main/build/Keep.java"])
         self.assertIsNone(report["git"])
 
+    def test_nested_repo_files_included(self):
+        # Отдельный клон внутри проекта: внешний git видит его одной строкой-каталогом «conf/».
+        nested = os.path.join(self.src, "conf")
+        os.makedirs(nested)
+        git(nested, "init", "-q")
+        write(nested, ".gitignore", "/.idea/\n")
+        write(nested, "gf/values.yaml", "a: 1\n")
+        write(nested, ".idea/x.xml", "<x/>")  # игнорируется .gitignore вложенного репозитория
+        self.commit(nested, "conf")
+        write(nested, "gf/new.yaml", "b: 2\n")
+        _, blobs = self.snapshot_parts()
+        dst = os.path.join(self.root, "svc-work")
+        shutil.copytree(self.src, dst, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+        git(dst, "init", "-q")
+        self.commit(dst, "home")
+        self.inbox_files(blobs)
+        report = service.apply_package(self.cfg, self.load_single(), target="svc-work")
+        self.assertFalse([p for p in report["deleted"] if p.startswith("conf/")], report["deleted"])
+        got = tree(os.path.join(self.root, "svc-work"))
+        for rel in ("conf/.gitignore", "conf/gf/values.yaml", "conf/gf/new.yaml"):
+            self.assertIn(rel, got)
+
     def test_with_binaries(self):
         _, blobs = self.snapshot_parts(with_binaries=True)
         self.inbox_files(blobs)

@@ -112,9 +112,14 @@ def _state(target, snap, rel):
     return "UPDATED"
 
 
-def _doomed(target, expected_nfc, self_project):
+def _doomed(target, expected_nfc, self_project, tracked_only=False):
+    """Файлы проекта, которых нет в снимке. tracked_only — только отслеживаемые git (режим ветки: как при
+    git checkout, неотслеживаемые файлы не трогаются и остаются в рабочем каталоге)."""
     mode = fsutil.detect_mode(target)
     scope = fsutil.list_project_files(target, mode, self_project)
+    if tracked_only:
+        tracked = set(os.fsdecode(p) for p in gitutil.git(target, "ls-files", "-z", "--cached").split(b"\x00") if p)
+        scope = [rel for rel in scope if rel in tracked]
     return mode, [rel for rel in scope
                   if fsutil.nfc(rel) not in expected_nfc and not fsutil.is_local_ide_file(rel)]
 
@@ -151,6 +156,13 @@ def apply_snapshot(cfg, archive, target_name, dry_run=False, force=False, commit
               "error": None, "blocked": False, "backup": None, "git": None, "branch": None,
               "history": history.summary(snap.history)}
 
+    if branch and not create:
+        if gitutil.has_own_repo(target) and gitutil.is_work_tree(target):
+            report["branch"] = branch_for(target, branch)
+        else:
+            report["warnings"].append("проект не в собственном git-репозитории — ветка не будет создана")
+    tracked_only = bool(report["branch"])
+
     if create:
         report["new"] = list(snap.files)
         doomed = []
@@ -163,19 +175,13 @@ def apply_snapshot(cfg, archive, target_name, dry_run=False, force=False, commit
                 report["updated"].append(rel)
             else:
                 report["unchanged"] += 1
-        report["mode"], doomed = _doomed(target, expected_nfc, self_project)
+        report["mode"], doomed = _doomed(target, expected_nfc, self_project, tracked_only)
         report["deleted"] = doomed
         if gitutil.is_work_tree(target):
             dirty = gitutil.status_count(target)
             if dirty:
                 report["warnings"].append("в проекте есть незакоммиченные изменения (%d) — перед применением "
                                           "делается бэкап затронутых файлов" % dirty)
-
-    if branch and not create:
-        if gitutil.has_own_repo(target) and gitutil.is_work_tree(target):
-            report["branch"] = branch_for(target, branch)
-        else:
-            report["warnings"].append("проект не в собственном git-репозитории — ветка не будет создана")
 
     if snap.project and snap.project != target_name:
         report["warnings"].append("снимок сделан с проекта %s, применяется к %s" % (snap.project, target_name))
@@ -221,9 +227,13 @@ def apply_snapshot(cfg, archive, target_name, dry_run=False, force=False, commit
 
         deleted = list(early)
         if not create:
-            # Пересчёт после записи: снимок мог принести новый .gitignore.
-            _, doomed_after = _doomed(target, expected_nfc, self_project)
+            # Пересчёт после записи: снимок мог принести новый .gitignore. Удаляются только файлы из
+            # предпросмотра — те, что прятал прежний .gitignore (локальные заметки и т.п.), остаются.
+            planned = set(doomed)
+            _, doomed_after = _doomed(target, expected_nfc, self_project, tracked_only)
             for rel in doomed_after:
+                if rel not in planned:
+                    continue
                 backup.before_delete(rel)
                 if fsutil.remove_file(target, rel):
                     deleted.append(rel)

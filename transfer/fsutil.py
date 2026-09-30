@@ -68,8 +68,7 @@ def list_project_files(root, mode, self_project=False):
     find — все файлы, кроме служебных каталогов сборки/IDE.
     """
     if mode == "git":
-        out = gitutil.git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-        candidates = [os.fsdecode(p) for p in out.split(b"\x00") if p]
+        candidates = _git_files(root)
     else:
         candidates = []
         for dirpath, dirnames, filenames in os.walk(root):
@@ -98,6 +97,24 @@ def list_project_files(root, mode, self_project=False):
             continue
         result.add(rel)
     return sorted(result)
+
+
+def _git_files(root, prefix=""):
+    """Файлы git-проекта. Вложенный репозиторий (отдельный клон или сабмодуль) git отдаёт одной строкой-
+    каталогом — его файлы берутся из его собственного git, рекурсивно."""
+    out = gitutil.git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    result = []
+    for p in out.split(b"\x00"):
+        if not p:
+            continue
+        rel = os.fsdecode(p).rstrip("/")
+        full = os.path.join(root, rel)
+        if os.path.isdir(full) and not os.path.islink(full):
+            if gitutil.has_own_repo(full) and gitutil.is_work_tree(full):
+                result.extend(_git_files(full, prefix + rel + "/"))
+            continue
+        result.append(prefix + rel)
+    return result
 
 
 def nfc(path):

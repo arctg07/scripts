@@ -111,6 +111,26 @@ class HistoryTest(TempEnv):
         self.assertEqual(git(dst, "status", "--porcelain"), "")
         self.assertTrue(git(dst, "rev-parse", "--verify", "work-" + today))
 
+    def test_branch_keeps_untracked_and_previously_ignored_files(self):
+        dst = self.clone_at(self.src, "home", "HEAD~3")
+        write(dst, ".gitignore", ".idea/\nsecret.env\nnotes/\n")
+        write(dst, "notes/local.md", "мои заметки\n")  # игнорировался дома, в снимке .gitignore без notes/
+        write(dst, "draft.md", "черновик\n")  # неотслеживаемый
+        write(dst, "HomeOnly.java", "class HomeOnly {}\n")
+        git(dst, "add", ".gitignore", "HomeOnly.java")
+        git(dst, "commit", "-q", "-m", "home")
+        _, package, _ = self.export()
+        preview = service.apply_package(self.cfg, package, target="home", dry_run=True, branch="work")
+        self.assertEqual(preview["deleted"], ["HomeOnly.java", "src/Del.java"])
+        report = service.apply_package(self.cfg, package, target="home", branch="work")
+        self.assertEqual(report["deleted"], ["HomeOnly.java", "src/Del.java"])
+        got = tree(dst)
+        self.assertIn("notes/local.md", got)
+        self.assertIn("draft.md", got)
+        self.assertNotIn("HomeOnly.java", got)
+        git(dst, "checkout", "-q", "main")  # отслеживаемые домашние файлы — в прежней ветке
+        self.assertIn("HomeOnly.java", tree(dst))
+
     def test_incremental_reuses_present_commits(self):
         dst = self.clone_at(self.src, "home", "HEAD~4")  # c08 — первые 6 коммитов истории уже есть
         _, package, _ = self.export()
