@@ -24,6 +24,7 @@ def copy_preview(cfg, project, mode, refs=None, ref=None, with_binaries=False, h
     if not gitutil.is_work_tree(repo):
         raise TransferError("проект %s — не git-репозиторий" % project)
     plan = git_copy.plan_copy(repo, _refs(mode, refs, ref))
+    plan.pop("steps")
     for f in plan["files"]:
         f.pop("blob", None)
     return plan

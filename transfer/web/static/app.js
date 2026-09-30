@@ -745,7 +745,9 @@ function renderApplyTail() {
   fill(opts,
     branchRow,
     p.kind === 'snapshot' && !exists ? cb('git init + стартовый коммит', 'initGit', 'история из снимка попадёт в ветку источника') : null,
-    exists && !withBranch ? cb('Закоммитить после применения', 'commit', 'коммит только применённых файлов; если в индексе уже что-то есть — коммит не создаётся') : null,
+    exists && !withBranch ? cb('Закоммитить после применения', 'commit', (p.kind === 'changes'
+      ? 'каждый перенесённый коммит — отдельным коммитом с исходным сообщением и автором; '
+      : 'коммит только применённых файлов; ') + 'если в индексе уже что-то есть — коммит не создаётся') : null,
     p.kind === 'snapshot' && exists ? cb('Удалять, даже если файлов много (force)', 'force', 'защита от применения снимка не к тому проекту') : null);
 
   const canRun = ap.target && (exists || p.kind === 'snapshot') && !ap.busy && !(withBranch && !ap.branchName.trim());

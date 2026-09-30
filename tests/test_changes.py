@@ -126,6 +126,52 @@ class GitCopyApplyTest(TempEnv):
         self.assertEqual(git(work, "log", "-1", "--format=%s"), "c1: add New, change a")
         self.assertEqual(git(work, "status", "--porcelain"), "")
 
+    def test_commit_each_commit_separately(self):
+        git(self.src, "commit", "-q", "--amend", "--no-edit", "--author", "Автор <author@example.com>",
+            "--date", "2026-01-02T03:04:05")
+        self.merge = git(self.src, "rev-parse", "HEAD")
+        _, package = self.copy_and_load([self.c1, self.c2, self.c3, self.merge])
+        work = self.clone_at(self.src, "svc-work", self.base)
+        report = service.apply_package(self.cfg, package, target="svc-work", commit=True)
+        self.assertEqual([c["subject"] for c in report["git"]["commits"]],
+                         ["c1: add New, change a", "c2: misc", "c3: change a again", "merge feature"])
+        self.assertEqual(git(work, "log", "--format=%s", "%s..HEAD" % self.base).splitlines(),
+                         ["merge feature", "c3: change a again", "c2: misc", "c1: add New, change a"])
+        fmt = "--format=%an <%ae> %ad %B"
+        self.assertEqual(git(work, "log", "-1", fmt, "--date=raw"), git(self.src, "log", "-1", fmt, "--date=raw"))
+        self.assertEqual(git(work, "log", "-1", "--format=%cn"), "Test")
+        # Каждый коммит меняет то же, что в источнике (a.txt: промежуточная версия в c1, итоговая в c3).
+        new = git(work, "rev-list", "--reverse", "%s..HEAD" % self.base).split()
+        for old, sha in zip((self.c1, self.c2, self.c3, self.merge), new):
+            want = git(self.src, "diff-tree", "-r", "--no-renames", "--no-commit-id", old + "^", old).splitlines()
+            self.assertEqual(git(work, "diff-tree", "-r", "--no-commit-id", sha).splitlines(),
+                             [l for l in want if not l.endswith(("logo.bin", "link"))])
+        self.assertEqual(git(work, "status", "--porcelain"), "")
+
+    def test_commit_skips_already_present(self):
+        _, package = self.copy_and_load([self.c1, self.c3])
+        work = self.clone_at(self.src, "svc-work", self.c1)
+        report = service.apply_package(self.cfg, package, target="svc-work", commit=True)
+        self.assertEqual([c["subject"] for c in report["git"]["commits"]], ["c3: change a again"])
+        self.assertEqual(report["git"]["reused"], 1)
+        self.assertEqual(git(work, "status", "--porcelain"), "")
+
+    def test_commit_in_project_inside_bigger_repo(self):
+        _, package = self.copy_and_load([self.c1, self.c3])
+        outer = os.path.join(self.root, "outer")
+        git(self.root, "clone", "-q", self.src, os.path.join(outer, "svc-work"))
+        work = os.path.join(outer, "svc-work")
+        git(work, "checkout", "-q", "-B", "main", self.base)
+        shutil.rmtree(os.path.join(work, ".git"))
+        git(outer, "init", "-q")
+        self.commit(outer, "outer base")
+        self.cfg = self.make_cfg(projects_root=outer)
+        report = service.apply_package(self.cfg, package, target="svc-work", commit=True)
+        self.assertEqual(len(report["git"]["commits"]), 2)
+        self.assertEqual(git(outer, "show", "HEAD~1:svc-work/a.txt"), "a\nb")
+        self.assertEqual(git(outer, "show", "HEAD:svc-work/a.txt"), "a\nb\nc")
+        self.assertEqual(git(outer, "status", "--porcelain"), "")
+
     def test_commit_skipped_when_index_has_foreign_changes(self):
         _, package = self.copy_and_load([self.c1])
         work = self.clone_at(self.src, "svc-work", self.base)
@@ -173,7 +219,10 @@ class GitCopyApplyTest(TempEnv):
 
     @unittest.skipUnless(shutil.which("bash"), "нужен bash")
     def test_output_is_readable_by_legacy_git_apply(self):
-        result = git_copy.copy_commits(self.cfg, "svc", [self.c1])
+        # a.txt меняют оба коммита: промежуточная версия уходит в блок VERSION, старый скрипт его пропускает.
+        result = git_copy.copy_commits(self.cfg, "svc", [self.c1, self.c3])
+        with open(result["parts"][0]["path"], "rb") as fh:
+            self.assertIn(b"\nVERSION: %s a.txt\n" % self.c1.encode(), fh.read())
         work = self.clone_at(self.src, "svc-work", self.base)
         os.makedirs(os.path.join(work, "sh"))
         shutil.copy(os.path.join(FIXTURES, "legacy_git_apply.sh"), os.path.join(work, "sh", "git-apply.sh"))
@@ -182,7 +231,8 @@ class GitCopyApplyTest(TempEnv):
         got = tree(work)
         for rel in ("a.txt", "src/New.java"):
             self.assertEqual(got[rel], (
-                "file", git(self.src, "show", "%s:%s" % (self.c1, rel)).encode() + b"\n", False))
+                "file", git(self.src, "show", "%s:%s" % (self.c3, rel)).encode() + b"\n", False))
+        self.assertEqual(git(work, "status", "--porcelain"), "M a.txt\n?? src/New.java")  # ничего лишнего
 
 
 if __name__ == "__main__":

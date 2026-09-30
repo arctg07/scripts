@@ -16,6 +16,7 @@ project-copy-<время>-part-NNN.txt со снимком формата 2.
 import base64
 import binascii
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -260,14 +261,22 @@ def encode_base64(data):
 
 # --- Формат changes (changed_classes.txt) -----------------------------------------------------
 
-def build_changes(meta_lines, files, deleted):
+def build_changes(meta_lines, files, deleted, versions=()):
     """files — список (path, content_bytes). Возвращает нагрузку в формате git-copy.sh.
 
     Метаданные — строки '# ...' до первого блока; старый git-apply.sh их пропускает.
+    versions — промежуточные версии файлов [(sha коммита, path, content)] для покоммитного применения:
+    блоки VERSION идут до блоков FILE, старый git-apply.sh их не замечает.
     """
     out = []
     for line in meta_lines:
         out.append(("# " + line + "\n").encode("utf-8"))
+    for sha, path, content in versions:
+        out.append(SEP + b"\n")
+        out.append(b"VERSION: " + sha.encode() + b" " + os.fsencode(path) + b"\n")
+        out.append(SEP + b"\n")
+        out.append(content)
+        out.append(b"\n\n")
     for path, content in files:
         out.append(SEP + b"\n")
         out.append(b"FILE: " + os.fsencode(path) + b"\n")
@@ -292,16 +301,19 @@ def default_eol(base):
 
 
 def parse_changes(payload):
-    """Разбор нагрузки changes. Возвращает dict с meta, files [(path, content)], deleted [path].
+    """Разбор нагрузки changes. Возвращает dict с meta, files [(path, content)], deleted [path],
+    versions {(sha, path): content}.
 
     Содержимое восстанавливается как в git-apply.sh: хвостовые пустые строки блока срезаются,
     затем добавляется один \\n. Метаданные EOL/EXEC уточняют окончание файла и исполняемость.
+    meta["history"] — изменения каждого коммита (COMMIT-DATA) для покоммитного применения.
     """
     lines = split_lines(payload)
-    meta = {"project": None, "commits": [], "exec": set(), "eol": {}, "skipped": [], "created": None}
-    files, deleted = [], []
+    meta = {"project": None, "commits": [], "exec": set(), "eol": {}, "skipped": [], "created": None,
+            "history": []}
+    files, deleted, raw_versions = [], [], []
     mode = "none"
-    cur_path, content = None, []
+    cur_path, cur_version, content = None, None, []
 
     def flush():
         if cur_path is None:
@@ -309,7 +321,10 @@ def parse_changes(payload):
         end = len(content)
         while end > 0 and content[end - 1] == b"":
             end -= 1
-        files.append((cur_path, b"\n".join(content[:end])))
+        if cur_version:
+            raw_versions.append((cur_version, cur_path, b"\n".join(content[:end])))
+        else:
+            files.append((cur_path, b"\n".join(content[:end])))
 
     n = len(lines)
     i = 0
@@ -320,13 +335,20 @@ def parse_changes(payload):
         if SEP_RE.match(line) and SEP_RE.match(nxt2):
             if nxt.startswith(b"FILE: "):
                 flush()
-                cur_path, content = os.fsdecode(nxt[6:]), []
+                cur_path, cur_version, content = os.fsdecode(nxt[6:]), None, []
+                mode = "file"
+                i += 3
+                continue
+            if nxt.startswith(b"VERSION: ") and b" " in nxt[9:]:
+                flush()
+                sha, _, path = nxt[9:].partition(b" ")
+                cur_path, cur_version, content = os.fsdecode(path), sha.decode("ascii", "replace"), []
                 mode = "file"
                 i += 3
                 continue
             if nxt == b"DELETED FILES":
                 flush()
-                cur_path, content = None, []
+                cur_path, cur_version, content = None, None, []
                 mode = "deleted"
                 i += 3
                 continue
@@ -346,7 +368,16 @@ def parse_changes(payload):
         if eol is None:
             eol = default_eol(base)
         result.append((path, base + b"\n" * eol))
-    return {"meta": meta, "files": result, "deleted": deleted}
+    eols = {}
+    for c in meta["history"]:
+        for path, kind, eol, _ in c["changes"]:
+            if kind == "version":
+                eols[(c["sha"], path)] = eol
+    versions = {}
+    for sha, path, base in raw_versions:
+        eol = eols.get((sha, path))
+        versions[(sha, path)] = base + b"\n" * (default_eol(base) if eol is None else eol)
+    return {"meta": meta, "files": result, "deleted": deleted, "versions": versions}
 
 
 def _parse_meta(text, meta):
@@ -366,6 +397,30 @@ def _parse_meta(text, meta):
             meta["eol"][path] = int(count)
     elif key == "SKIPPED":
         meta["skipped"].append(value)
+    elif key == "COMMIT-DATA":
+        entry = _parse_commit_data(value)
+        if entry:
+            meta["history"].append(entry)
+
+
+def commit_data(sha, author, message, changes):
+    """Строка метаданных COMMIT-DATA. changes — [(path, "file" | "delete" | "version", eol, exec)]:
+    file — итоговая версия из блока FILE, version — промежуточная из блока VERSION."""
+    return "COMMIT-DATA: " + json.dumps({"sha": sha, "author": list(author), "message": message,
+                                          "changes": [list(c) for c in changes]},
+                                         ensure_ascii=False, separators=(",", ":"))
+
+
+def _parse_commit_data(value):
+    try:
+        data = json.loads(value)
+        changes = [(str(path), kind, int(eol), bool(is_exec)) for path, kind, eol, is_exec in data["changes"]
+                   if kind in ("file", "delete", "version")]
+        author = [str(x) for x in data.get("author") or []]
+        return {"sha": str(data["sha"]), "author": author if len(author) == 3 else None,
+                "message": str(data.get("message") or ""), "changes": changes}
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 # --- Безопасность путей ----------------------------------------------------------------------

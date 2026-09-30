@@ -275,6 +275,35 @@ def commit_paths(repo, paths, message):
     return git_str(repo, "rev-parse", "HEAD"), None
 
 
+def staged_changes(repo):
+    return run_git(repo, ["diff", "--cached", "--quiet"], check=False)[0] != 0
+
+
+def show_prefix(repo):
+    """Путь каталога repo относительно корня репозитория ('' или 'sub/dir/')."""
+    return git_str(repo, "rev-parse", "--show-prefix")
+
+
+def toplevel(repo):
+    return git_str(repo, "rev-parse", "--show-toplevel")
+
+
+def hash_blob(repo, data, path):
+    """Записывает содержимое в объекты git (с фильтрами .gitattributes для path) и возвращает хеш."""
+    return git_str(repo, "hash-object", "-w", "--stdin", "--path", path, input=data)
+
+
+def update_ref(repo, ref, new, old, message):
+    """Сдвигает ref (HEAD — вместе с веткой), только если он всё ещё указывает на old (None — не существует)."""
+    run_git(repo, ["update-ref", "-m", message, ref, new, old or ZERO_SHA])
+
+
+def reset_paths(repo, paths):
+    """Индекс для перечисленных путей приводится к HEAD; рабочий каталог не меняется."""
+    for chunk in _pathspec_chunks(paths):
+        run_git(repo, ["reset", "-q", "--"] + chunk)
+
+
 def init_repo(repo, branch=None):
     run_git(repo, ["init", "-q"])
     if branch and not branch.startswith("("):
@@ -417,6 +446,12 @@ class TempIndex(object):
         data = b"".join(os.fsencode(p) + b"\x00" for p in paths)
         if data:
             self.run(["update-index", "--force-remove", "-z", "--stdin"], input=data)
+
+    def set_blobs(self, entries):
+        """entries — [(режим, хеш blob, путь)]."""
+        data = b"".join(("%s %s\t" % (mode, sha)).encode() + os.fsencode(p) + b"\x00" for mode, sha, p in entries)
+        if data:
+            self.run(["update-index", "-z", "--index-info"], input=data)
 
     def apply(self, patch, reverse=False):
         if not patch.strip():

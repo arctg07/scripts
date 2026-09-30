@@ -5,6 +5,9 @@
 Коммиты обрабатываются в порядке истории (topo-order), для merge-коммита учитываются изменения
 относительно первого родителя.
 
+Для покоммитного применения в выгрузку добавляется, что менял каждый коммит (COMMIT-DATA: автор,
+сообщение, пути), и промежуточные версии файлов, которые меняли несколько выбранных коммитов (VERSION).
+
 Важно: если между выбранными коммитами есть невыбранные, менявшие те же файлы, их правки тоже
 окажутся в выгрузке — такие случаи перечисляются в предупреждениях.
 """
@@ -48,8 +51,11 @@ def plan_copy(repo, refs):
     """Что попадёт в выгрузку — без чтения содержимого файлов."""
     ordered = expand_refs(repo, refs)
     latest = {}  # путь -> (коммит, статус, режим, blob)
+    steps = []  # (коммит, [(статус, путь, режим, blob)])
     for sha in ordered:
-        for status, path, mode, blob in gitutil.diff_tree_raw(repo, sha):
+        changes = gitutil.diff_tree_raw(repo, sha)
+        steps.append((sha, changes))
+        for status, path, mode, blob in changes:
             latest[path] = (sha, status, mode, blob)
 
     files, deleted, skipped = [], [], []
@@ -73,7 +79,7 @@ def plan_copy(repo, refs):
         c = info[sha]
         commits.append({"sha": sha, "short": c["short"], "subject": c["subject"], "time": c["time"],
                         "author": c["author"], "merge": c["merge"]})
-    return {"commits": commits, "files": files, "deleted": deleted, "skipped": skipped,
+    return {"commits": commits, "files": files, "deleted": deleted, "skipped": skipped, "steps": steps,
             "between": find_unselected(repo, ordered, set(latest))}
 
 
@@ -122,9 +128,43 @@ def build_payload(repo, project, plan):
             eol = formats.eol_count(content)
             if eol != formats.default_eol(base):
                 meta.append("EOL: %d %s" % (eol, f["path"]))
+        history, versions = _history(repo, plan, reader, set(p for p, _ in files), set(plan["deleted"]))
     for s in skipped:
         meta.append("SKIPPED: %s (%s)" % (s["path"], s["reason"]))
-    return formats.build_changes(meta, files, plan["deleted"]), files, skipped
+    meta.extend(history)
+    return formats.build_changes(meta, files, plan["deleted"], versions), files, skipped
+
+
+def _history(repo, plan, reader, final_files, final_deleted):
+    """Строки COMMIT-DATA и промежуточные версии файлов для покоммитного применения.
+
+    Итоговая версия пути берётся из блока FILE (или DELETED FILES); более ранние изменения того же пути —
+    из блоков VERSION. Пути, не попавшие в выгрузку (бинарные, симлинки, подмодули), в коммитах не меняются,
+    как и промежуточные бинарные версии и симлинки: их изменение войдёт в коммит с итоговой версией.
+    """
+    last = {}
+    for sha, changes in plan["steps"]:
+        for _, path, _, _ in changes:
+            last[path] = sha
+    lines, versions = [], []
+    for sha, changes in plan["steps"]:
+        entries = []
+        for status, path, mode, blob in changes:
+            if path not in final_files and path not in final_deleted:
+                continue
+            if last[path] == sha:
+                entries.append((path, "delete" if status == "D" else "file", 0, False))
+            elif status == "D":
+                entries.append((path, "delete", 0, False))
+            elif mode not in (MODE_LINK, MODE_GITLINK):
+                content = reader.read(blob)
+                if b"\x00" in content:
+                    continue
+                versions.append((sha, path, content))
+                entries.append((path, "version", formats.eol_count(content), mode == MODE_EXEC))
+        info = gitutil.commit_meta(repo, sha)
+        lines.append(formats.commit_data(sha, info["author"], info["message"], entries))
+    return lines, versions
 
 
 def copy_commits(cfg, project, refs):
