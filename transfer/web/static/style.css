@@ -243,6 +243,32 @@ details .file-list { margin: 6px 0 0 4px; }
 .history .mono { overflow-wrap: anywhere; }
 .table-scroll { overflow-x: auto; }
 
+/* --- Ход операции --- */
+.job-stage { font-size: 13px; margin: 2px 0 6px; }
+.progress { height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; margin-bottom: 8px; }
+.progress > div { height: 100%; background: var(--accent); transition: width .3s; }
+.progress.indeterminate > div { width: 30%; animation: slide 1.2s ease-in-out infinite; }
+@keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+.joblog {
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5; max-height: 320px; overflow: auto;
+  background: var(--panel-2); border-radius: 8px; padding: 6px 10px; margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.joblog .t { color: var(--muted); margin-right: 8px; white-space: pre; }
+.joblog .ln.git { color: var(--muted); }
+.joblog.hide-git .ln.git { display: none; }
+.joblog .ln.stage { font-weight: 600; }
+.joblog .ln.warn { color: var(--warn); }
+.joblog .ln.error { color: var(--err); }
+.joblog .ln.ok { color: var(--ok); font-weight: 600; }
+
+/* --- Очистка --- */
+.clean-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; position: sticky; top: -18px; z-index: 5; }
+.clean tr { cursor: pointer; }
+.clean tr:hover td { background: var(--panel-2); }
+.clean tr.selected td { background: var(--accent-soft); }
+.clean td.cb { width: 30px; }
+.clean tr:first-child td { border-top: 0; }
+
 /* --- Модальное окно и уведомления --- */
 .modal { position: fixed; inset: 0; background: rgba(10, 14, 20, .45); display: grid; place-items: center; z-index: 50; padding: 16px; }
 .modal-box { background: var(--panel); border-radius: 14px; padding: 18px 20px; width: min(560px, 100%); box-shadow: 0 20px 50px rgba(0,0,0,.3); }

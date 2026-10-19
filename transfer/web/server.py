@@ -22,7 +22,7 @@ try:
 except ImportError:  # pragma: no cover
     raise
 
-from .. import TransferError, VERSION, backup, formats, gitutil, inbox, projects, service
+from .. import TransferError, VERSION, backup, formats, gitutil, inbox, progress, projects, service, storage
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
@@ -50,6 +50,7 @@ class App(object):
     def __init__(self, cfg):
         self.cfg = cfg
         self.token = secrets.token_urlsafe(24)
+        self.echo = sys.stderr  # лог фоновых задач дублируется в консоль ui.sh
         self.routes = []
         route = self.route
         route("GET", r"/api/state", self.state)
@@ -61,6 +62,10 @@ class App(object):
         route("GET", r"/api/projects/(?P<p>[^/]+)/exports", self.exports)
         route("POST", r"/api/copy/preview", self.copy_preview)
         route("POST", r"/api/copy", self.copy)
+        route("POST", r"/api/jobs/copy", self.copy_job)
+        route("GET", r"/api/jobs/active", self.job_active)
+        route("GET", r"/api/jobs/(?P<job_id>[0-9a-f]+)", self.job)
+        route("POST", r"/api/jobs/(?P<job_id>[0-9a-f]+)/cancel", self.job_cancel)
         route("GET", r"/api/export/(?P<p>[^/]+)/(?P<name>[^/]+)", self.export_file)
         route("GET", r"/api/inbox", self.inbox_list)
         route("POST", r"/api/inbox", self.inbox_add)
@@ -68,6 +73,8 @@ class App(object):
         route("POST", r"/api/apply", self.apply)
         route("GET", r"/api/backups", self.backups)
         route("POST", r"/api/backups/restore", self.restore)
+        route("GET", r"/api/storage", self.storage)
+        route("POST", r"/api/storage/delete", self.storage_delete)
 
     def route(self, method, pattern, handler):
         self.routes.append((method, re.compile("^" + pattern + "$"), handler))
@@ -156,6 +163,40 @@ class App(object):
     def copy(self, body, **_):
         return service.copy(self.cfg, **self._copy_args(body))
 
+    def copy_job(self, body, **_):
+        """Копирование или предпросмотр (preview: true) в фоне: лог и ход — через /api/jobs/<id>."""
+        args = self._copy_args(body)
+        is_preview = _bool(body.get("preview"))
+        projects.validate_name(args["project"])
+        what = {"last": "последний коммит", "commits": "коммиты", "project": "весь проект"}.get(args["mode"], args["mode"])
+        title = "%s %s: %s" % ("Предпросмотр" if is_preview else "Копирование", args["project"], what)
+        if args["mode"] == "project" and args["history"]:
+            title += ", история %d" % args["history"]
+        fn = service.copy_preview if is_preview else service.copy
+        job = progress.start(title, lambda: fn(self.cfg, **args),
+                             meta={"op": "preview" if is_preview else "copy", "request": body}, echo=self.echo)
+        return job.info()
+
+    def _job(self, job_id):
+        job = progress.get(job_id)
+        if not job:
+            raise ApiError(404, "задача не найдена (сервер перезапускали?)")
+        return job
+
+    def job(self, job_id, query, **_):
+        return self._job(job_id).info(int(query.get("since") or 0))
+
+    def job_active(self, **_):
+        job = progress.active()
+        return {"job": job.info() if job else None}
+
+    def job_cancel(self, job_id, **_):
+        job = self._job(job_id)
+        if not job.cancel():
+            raise ApiError(409, "задачу уже нельзя остановить: %s" % ("идёт запись результата" if job.status == "running"
+                                                                     else "она завершена"))
+        return job.info()
+
     def export_file(self, p, name, **_):
         if "/" in p or p.startswith(".") or "/" in name or name.startswith(".") or not name.endswith(".txt"):
             raise ApiError(400, "некорректный путь")
@@ -194,6 +235,17 @@ class App(object):
     def restore(self, body, **_):
         with service.LOCK:
             return backup.restore(self.cfg, body.get("id"))
+
+    def storage(self, **_):
+        return storage.list_items(self.cfg)
+
+    def storage_delete(self, body, **_):
+        if not service.LOCK.acquire(False):
+            raise ApiError(409, "идёт другая операция — дождитесь окончания")
+        try:
+            return storage.delete(self.cfg, body.get("items"))
+        finally:
+            service.LOCK.release()
 
 
 class RawResponse(object):

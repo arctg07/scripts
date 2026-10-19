@@ -5,8 +5,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
-from . import TransferError
+from . import TransferError, progress
 
 ZERO_SHA = "0" * 40
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{4,40}$")
@@ -19,16 +20,51 @@ class GitError(TransferError):
 def run_git(cwd, args, input=None, check=True, env=None):
     """Запускает git и возвращает (код, stdout, stderr) в байтах."""
     cmd = ["git", "-c", "core.quotepath=off"] + list(args)
+    job = progress.current()
+    if job:
+        job.check()
+    t0 = time.time()
+    # В задаче git запускается в своей группе процессов: остановка убивает и его дочерние процессы.
+    extra = {"start_new_session": True} if job and os.name == "posix" else {}
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, **extra)
     except OSError as exc:
         raise GitError("не удалось запустить git: %s" % exc)
-    out, err = proc.communicate(input)
+    if job:
+        job.attach(proc)
+        try:
+            out, err = proc.communicate(input)
+        finally:
+            job.detach()
+        dt = time.time() - t0
+        job.log("git %s — %.2f с, %s" % (_describe(args), dt, progress.fmt_size(len(out))),
+                "warn" if dt >= progress.SLOW_GIT else "git")
+        job.check()
+    else:
+        out, err = proc.communicate(input)
     if check and proc.returncode != 0:
         msg = err.decode("utf-8", "replace").strip() or out.decode("utf-8", "replace").strip()
         raise GitError("git %s: %s" % (" ".join(args[:3]), msg))
     return proc.returncode, out, err
+
+
+def _describe(args):
+    """Команда git для лога: длинные списки исключений и путей сворачиваются."""
+    shown, excluded = [], 0
+    for a in args:
+        if a.startswith(":(exclude"):
+            excluded += 1
+        elif a in _DIFF_OPTS:
+            continue
+        elif len(a) == 40 and _SHA_RE.match(a):
+            shown.append(a[:10])
+        else:
+            shown.append(a if len(a) <= 60 else a[:57] + "...")
+    text = " ".join(shown)
+    if len(text) > 200:
+        text = text[:197] + "..."
+    return text + (" (+%d исключений)" % excluded if excluded else "")
 
 
 def git(cwd, *args, **kwargs):
@@ -339,6 +375,21 @@ def tree_of(repo, rev):
 def first_parent_history(repo, limit):
     """Последние limit коммитов HEAD по первому родителю, от старых к новым."""
     return list(reversed(rev_list(repo, "--first-parent", "-n", str(int(limit)), "HEAD")))
+
+
+def first_parent_log(repo, limit):
+    """Последние limit коммитов HEAD по первому родителю, от старых к новым, одним вызовом git:
+    [{"sha", "parent", "author", "committer", "message"}] (поля — как у commit_meta)."""
+    raw = git(repo, "log", "-z", "--first-parent", "-n", str(int(limit)), "--date=raw",
+              "--format=%H%x00%P%x00%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd%x00%B", "HEAD", "--")
+    fields = raw.decode("utf-8", "replace").split("\x00")
+    result = []
+    for i in range(0, len(fields) - 8, 9):
+        f = fields[i:i + 9]
+        parents = f[1].split()
+        result.append({"sha": f[0].strip(), "parent": parents[0] if parents else None, "author": f[2:5],
+                       "committer": f[5:8], "message": f[8].rstrip("\n") + "\n"})
+    return list(reversed(result))
 
 
 def first_parent(repo, sha):

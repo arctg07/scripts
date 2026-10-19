@@ -1,6 +1,7 @@
 import http.client
 import json
 import threading
+import time
 import unittest
 
 from helpers import TempEnv, write
@@ -17,6 +18,7 @@ class WebTest(TempEnv):
         write(repo, "a.txt", "b\n")
         self.sha = self.commit(repo, "second")
         self.app, self.server = make_server(self.cfg, 0)
+        self.app.echo = None
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.daemon = True
@@ -88,6 +90,32 @@ class WebTest(TempEnv):
         status, err = self.request("POST", "/api/apply", {"key": pkg["key"], "target": "../x"})
         self.assertEqual(status, 400)
         self.assertIn("error", err)
+
+    def test_copy_job_with_log_and_cleanup(self):
+        status, job = self.request("POST", "/api/jobs/copy", {"project": "svc", "mode": "project", "history": 2})
+        self.assertEqual(status, 200, job)
+        lines, since = [], 0
+        for _ in range(100):
+            status, info = self.request("GET", "/api/jobs/%s?since=%d" % (job["id"], since))
+            self.assertEqual(status, 200, info)
+            lines += info["lines"]
+            since = info["next"]
+            if info["status"] != "running":
+                break
+            time.sleep(0.05)
+        self.assertEqual(info["status"], "done", info)
+        self.assertEqual(info["result"]["kind"], "snapshot")
+        self.assertTrue(any(level == "git" for _, level, _ in lines))
+        self.assertEqual(self.request("POST", "/api/jobs/%s/cancel" % job["id"])[0], 409)
+        self.assertEqual(self.request("GET", "/api/jobs/active")[1], {"job": None})
+
+        status, data = self.request("GET", "/api/storage")
+        self.assertEqual(status, 200)
+        items = [{"area": i["area"], "key": i["key"]} for i in data["items"] if i["area"] == "export"]
+        self.assertEqual(len(items), 1)
+        status, result = self.request("POST", "/api/storage/delete", {"items": items})
+        self.assertEqual((status, len(result["removed"])), (200, 1))
+        self.assertEqual(self.request("GET", "/api/projects/svc/exports")[1]["files"], [])
 
     def test_errors_are_json(self):
         status, body = self.request("GET", "/api/projects/nope/branches")

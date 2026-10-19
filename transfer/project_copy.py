@@ -19,22 +19,35 @@ import os
 import tarfile
 import time
 
-from . import TransferError, formats, fsutil, gitutil, history, projects
+from . import TransferError, formats, fsutil, gitutil, history, progress, projects
+
+BIG_FILE = 5 * 1024 * 1024  # такие файлы отмечаются в логе
 
 
 def _collect(cfg, project, with_binaries):
     root = projects.existing_project(cfg, project)
     mode = fsutil.detect_mode(root)
     self_project = projects.is_self(cfg, root)
+    progress.log("Проект %s: %s (отбор файлов: %s)" % (project, root, mode))
+    with progress.timed("Список файлов проекта"):
+        candidates = fsutil.list_project_files(root, mode, self_project)
+    progress.log("файлов в проекте: %d" % len(candidates))
     files, keep, total = [], [], 0
-    for rel in fsutil.list_project_files(root, mode, self_project):
+    for i, rel in enumerate(candidates):
+        if i % 100 == 0:
+            progress.step("Проверка файлов (бинарные / размер)", i, len(candidates))
         full = os.path.join(root, rel)
         if not os.path.islink(full):
+            size = os.path.getsize(full)
+            if size >= BIG_FILE:
+                progress.log("большой файл: %s (%s)" % (rel, progress.fmt_size(size)), "warn")
             if not with_binaries and fsutil.is_binary(full):
                 keep.append(rel)
                 continue
-            total += os.path.getsize(full)
+            total += size
         files.append(rel)
+    progress.log("в снимок: %d файлов (%s), бинарных не переносится: %d" % (len(files), progress.fmt_size(total),
+                                                                            len(keep)))
     warnings = []
     if mode == "find":
         warnings.append("проект не в git — проверьте, что в снимок не попали локальные секреты (.env и т.п.)")
@@ -52,9 +65,11 @@ def preview(cfg, project, with_binaries=False, history_limit=None):
     commits = []
     limit = _history_limit(cfg, history_limit)
     if mode == "git" and limit and gitutil.has_own_repo(root) and gitutil.resolve_commit(root, "HEAD"):
+        progress.step("История коммитов", 0, 0)
         shas = gitutil.first_parent_history(root, limit)
         info = gitutil.commits_info(root, shas)
         commits = [info[sha] for sha in reversed(shas) if sha in info]
+        progress.log("коммитов истории: %d" % len(commits))
     return {"project": project, "mode": mode, "files": len(files), "bytes": total, "keep": keep,
             "warnings": warnings, "file_list": files[:2000], "history": commits}
 
@@ -93,7 +108,9 @@ def build_archive(root, project, mode, files, keep, history_data=None, history_m
     now = int(time.time())
     with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
         _add_bytes(tar, "manifest.txt", manifest_bytes, now)
-        for rel in files:
+        for i, rel in enumerate(files):
+            if i % 50 == 0:
+                progress.step("Упаковка файлов в архив", i, len(files))
             tar.add(os.path.join(root, rel), arcname="files/" + rel, recursive=False, filter=_reset_owner)
         if history_data:
             _add_bytes(tar, history.MANIFEST, json.dumps(history_data, ensure_ascii=False, indent=1).encode("utf-8"),
@@ -105,14 +122,23 @@ def build_archive(root, project, mode, files, keep, history_data=None, history_m
 
 def copy_project(cfg, project, with_binaries=False, history_limit=None):
     root, mode, files, keep, total, warnings = _collect(cfg, project, with_binaries)
-    history_data, history_members, history_warnings = history.collect(
-        root, files, _history_limit(cfg, history_limit), with_binaries, projects.is_self(cfg, root))
+    limit = _history_limit(cfg, history_limit)
+    with progress.timed("История коммитов (%d)" % limit):
+        history_data, history_members, history_warnings = history.collect(
+            root, files, limit, with_binaries, projects.is_self(cfg, root))
     warnings += history_warnings
-    archive = build_archive(root, project, mode, files, keep, history_data, history_members)
+    for w in warnings:
+        progress.log(w, "warn")
+    with progress.timed("Архив tar.gz"):
+        archive = build_archive(root, project, mode, files, keep, history_data, history_members)
+    progress.log("архив: %s" % progress.fmt_size(len(archive)))
     pkg_id = formats.new_package_id()
-    payload = formats.encode_base64(archive)
-    parts = formats.make_parts("snapshot", project, pkg_id, payload, formats.sha256(archive), cfg.max_lines)
+    with progress.timed("base64 и разбиение на части"):
+        payload = formats.encode_base64(archive)
+        parts = formats.make_parts("snapshot", project, pkg_id, payload, formats.sha256(archive), cfg.max_lines)
+    progress.no_cancel()
     written = formats.write_parts(cfg.export_dir, project, "snapshot", pkg_id, parts)
+    progress.log("записано частей: %d в %s" % (len(written), os.path.dirname(written[0]["path"])))
     return {"kind": "snapshot", "project": project, "id": pkg_id, "parts": written, "mode": mode,
             "files": len(files), "bytes": total, "archive_bytes": len(archive), "keep": keep,
             "warnings": warnings, "history": history.summary(history_data)}

@@ -1,17 +1,31 @@
 """Операции верхнего уровня — общие для CLI и веб-UI."""
 
+import contextlib
 import threading
 
-from . import TransferError, git_apply, git_copy, gitutil, inbox, project_apply, project_copy, projects
+from . import TransferError, git_apply, git_copy, gitutil, inbox, progress, project_apply, project_copy, projects
 
 # Операции, меняющие файлы, выполняются по одной.
 LOCK = threading.Lock()
 
 
+@contextlib.contextmanager
+def _locked():
+    """LOCK, ожидание которого видно в логе задачи и прерывается её остановкой."""
+    if not LOCK.acquire(False):
+        progress.log("ждём завершения другой операции (применение или откат)…", "warn")
+        while not LOCK.acquire(True, 0.5):
+            progress.check()
+    try:
+        yield
+    finally:
+        LOCK.release()
+
+
 def copy(cfg, project, mode, refs=None, ref=None, with_binaries=False, history=None):
     """mode: last — последний коммит ветки ref; commits — выбранные refs; project — снимок целиком
     (history — сколько последних коммитов добавить, None — из настроек)."""
-    with LOCK:
+    with _locked():
         if mode == "project":
             return project_copy.copy_project(cfg, project, with_binaries, history)
         return git_copy.copy_commits(cfg, project, _refs(mode, refs, ref))

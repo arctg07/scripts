@@ -3,7 +3,7 @@
 
   scripts.py projects                                   список проектов в корне
   scripts.py git-copy <проект> [ref ...]                выгрузка коммитов (без ref — HEAD)
-  scripts.py project-copy <проект> [--with-binaries] [--history N]   снимок проекта целиком
+  scripts.py project-copy <проект> [--with-binaries] [--history N] [-v]   снимок проекта целиком
   scripts.py inbox                                      что лежит во входящих
   scripts.py git-apply [файлы] [--project X] [--dry-run] [--commit]
   scripts.py project-apply [файлы] [--project X] [--dry-run] [--force] [--commit] [--no-git] [--branch ИМЯ]
@@ -17,7 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
-from transfer import TransferError, backup, inbox, projects, service  # noqa: E402
+from transfer import TransferError, backup, inbox, progress, projects, service  # noqa: E402
 from transfer.config import DEFAULTS, load_config  # noqa: E402
 
 
@@ -34,13 +34,19 @@ def cmd_projects(cfg, args):
         print("  %s%s" % (p["name"], "" if p["git"] else "   (без git)"))
 
 
+def _run(args, title, fn):
+    """-v: ход операции и вызовы git с длительностью — в stderr."""
+    return progress.run_verbose(title, fn) if args.verbose else fn()
+
+
 def print_parts(result):
     for part in result["parts"]:
         print("  %s  (%d строк, %s)" % (part["path"], part["lines"], human_size(part["bytes"])))
 
 
 def cmd_git_copy(cfg, args):
-    result = service.copy(cfg, args.project, "commits", refs=args.refs or ["HEAD"])
+    result = _run(args, "git-copy " + args.project,
+                  lambda: service.copy(cfg, args.project, "commits", refs=args.refs or ["HEAD"]))
     print("Коммитов: %d" % len(result["commits"]))
     for c in result["commits"]:
         print("  %s %s" % (c["short"], c["subject"]))
@@ -59,7 +65,9 @@ def cmd_git_copy(cfg, args):
 
 
 def cmd_project_copy(cfg, args):
-    result = service.copy(cfg, args.project, "project", with_binaries=args.with_binaries, history=args.history)
+    result = _run(args, "project-copy " + args.project,
+                  lambda: service.copy(cfg, args.project, "project", with_binaries=args.with_binaries,
+                                       history=args.history))
     for w in result["warnings"]:
         print("WARN: " + w, file=sys.stderr)
     if result["history"]:
@@ -208,6 +216,7 @@ def build_parser():
     p = sub.add_parser("git-copy", help="выгрузка коммитов")
     p.add_argument("project")
     p.add_argument("refs", nargs="*", help="хеш, ветка, тег, HEAD~N, диапазон A..B (по умолчанию HEAD)")
+    p.add_argument("-v", "--verbose", action="store_true", help="подробный лог в stderr")
     p.set_defaults(func=cmd_git_copy)
 
     p = sub.add_parser("project-copy", help="снимок проекта")
@@ -216,6 +225,7 @@ def build_parser():
     p.add_argument("--history", type=int, metavar="N",
                    help="сколько последних коммитов добавить в снимок (0 — без истории; по умолчанию %d)"
                         % DEFAULTS["history_commits"])
+    p.add_argument("-v", "--verbose", action="store_true", help="подробный лог: этапы, вызовы git и их длительность")
     p.set_defaults(func=cmd_project_copy)
 
     p = sub.add_parser("inbox", help="входящие выгрузки")

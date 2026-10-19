@@ -17,7 +17,7 @@
 
 import os
 
-from . import fsutil, gitutil
+from . import fsutil, gitutil, progress
 
 VERSION = 1
 MANIFEST = "history.json"
@@ -36,9 +36,15 @@ def collect(root, files, limit, with_binaries, self_project):
         return None, {}, []
 
     empty = gitutil.empty_tree(root)
-    steps = [(sha, gitutil.first_parent(root, sha)) for sha in gitutil.first_parent_history(root, limit)]
-    stats = [gitutil.diff_numstat(root, parent or empty, sha) for sha, parent in steps]
-    worktree_stat = gitutil.diff_numstat(root, "HEAD")
+    chain = gitutil.first_parent_log(root, limit)
+    progress.log("История: %d коммитов (запрошено %d)" % (len(chain), limit))
+    stats = []
+    for i, c in enumerate(chain):
+        progress.step("Изменённые файлы коммитов истории", i, len(chain))
+        stats.append(gitutil.diff_numstat(root, c["parent"] or empty, c["sha"]))
+    with progress.timed("Незакоммиченные изменения (git diff HEAD)"):
+        worktree_stat = gitutil.diff_numstat(root, "HEAD")
+    progress.log("незакоммиченных изменений: %d файлов" % len(worktree_stat))
 
     # Путь исключается целиком (из всех патчей), если его содержимое в снимке не совпадёт с источником.
     files_set = set(files)
@@ -50,19 +56,29 @@ def collect(root, files, limit, with_binaries, self_project):
                     or fsutil.is_local_ide_file(path) or fsutil.is_protected(path, self_project):
                 exclude.add(path)
 
+    if exclude:
+        progress.log("из патчей истории исключено путей: %d (бинарные, IDE, вне снимка)" % len(exclude))
+
     members, commits = {}, []
-    for i, ((sha, parent), stat) in enumerate(zip(steps, stats), 1):
-        meta = gitutil.commit_meta(root, sha)
-        entry = {"sha": sha, "parent": parent, "author": meta["author"], "committer": meta["committer"],
-                 "message": meta["message"]}
+    for i, (c, stat) in enumerate(zip(chain, stats), 1):
+        progress.step("Патчи коммитов истории", i - 1, len(chain))
+        sha, parent = c["sha"], c["parent"]
+        entry = {"sha": sha, "parent": parent, "author": c["author"], "committer": c["committer"],
+                 "message": c["message"]}
+        subject = c["message"].split("\n", 1)[0][:80]
         if parent is None:
             # Корневой коммит только создаёт файлы: вместо патча со всем проектом — список путей.
             entry["paths"] = sorted(p for p, _ in stat if p not in exclude)
+            progress.log("  %d/%d %s %s — корневой, %d путей" % (i, len(chain), sha[:10], subject, len(entry["paths"])))
         else:
             entry["patch"] = "history/%04d.patch" % i
             members[entry["patch"]] = gitutil.diff_patch(root, parent, sha, exclude)
+            progress.log("  %d/%d %s %s — %d файлов, патч %s" % (
+                i, len(chain), sha[:10], subject, len(stat), progress.fmt_size(len(members[entry["patch"]]))))
         commits.append(entry)
+    progress.step("Патч незакоммиченных изменений", 0, 0)
     members["history/worktree.patch"] = gitutil.diff_patch(root, "HEAD", None, exclude)
+    progress.log("история: %d патчей, %s" % (len(members), progress.fmt_size(sum(len(v) for v in members.values()))))
 
     tracked = set(os.fsdecode(p) for p in gitutil.git(root, "ls-files", "-z", "--cached").split(b"\x00") if p)
     data = {"version": VERSION, "head": head, "commits": commits, "worktree": "history/worktree.patch",

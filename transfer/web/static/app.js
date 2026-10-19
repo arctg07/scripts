@@ -161,9 +161,10 @@ function switchTab(tab) {
   app.tab = tab;
   store.set('tab', tab);
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
-  for (const v of ['copy', 'apply', 'history']) $('#view-' + v).hidden = v !== tab;
+  for (const v of ['copy', 'apply', 'history', 'clean']) $('#view-' + v).hidden = v !== tab;
   if (tab === 'apply') loadInbox();
   if (tab === 'history') loadHistory();
+  if (tab === 'clean') loadStorage();
 }
 
 /* ---------- Копирование ---------- */
@@ -172,7 +173,7 @@ const cp = {
   filter: '', project: null, info: null, mode: 'commits', branches: [], branch: null,
   commits: [], more: false, q: '', loading: false, selected: new Map(), anchor: null,
   expanded: new Map(), preview: null, previewSig: null, result: null, withBinaries: false, busy: false, exports: [],
-  history: null,
+  history: null, job: null,
 };
 
 function historyLimit() {
@@ -264,38 +265,179 @@ function copyRequest() {
 
 function sig() { return JSON.stringify(copyRequest()); }
 
-async function doPreview() {
-  cp.busy = true; renderActions();
-  try {
-    cp.preview = await api('POST', '/api/copy/preview', copyRequest());
-    cp.previewSig = sig();
-  } catch (e) {
-    toast(e.message, true);
-  } finally {
-    cp.busy = false;
-  }
-  renderCopy();
-  reveal('#preview-card');
-}
+function doPreview() { return startCopyJob(true); }
+function doCopy() { return startCopyJob(false); }
 
 function reveal(sel) {
   const el = $(sel);
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-async function doCopy() {
+/* ---------- Фоновые задачи: лог, ход, остановка ---------- */
+
+// cp.job — последняя задача копирования/предпросмотра; лог дописывается в постоянный элемент,
+// чтобы перерисовка карточки не сбрасывала прокрутку и не строила тысячи строк заново.
+const jobView = { log: null, details: null, timer: null, showGit: store.get('showGit', true) };
+
+async function startCopyJob(preview) {
   cp.busy = true; renderActions();
   try {
-    cp.result = await api('POST', '/api/copy', copyRequest());
-    await loadExports();
-    toast(`Готово: ${cp.result.parts.length} ${plural(cp.result.parts.length, 'часть', 'части', 'частей')}`);
+    const job = await api('POST', '/api/jobs/copy', Object.assign(copyRequest(), { preview }));
+    attachJob(job);
+  } catch (e) {
+    cp.busy = false; renderActions();
+    toast(e.message, true);
+    checkActiveJob();
+  }
+}
+
+function attachJob(job) {
+  cp.job = Object.assign({}, job, { lines: [] });
+  cp.busy = true;
+  jobView.log = h('div', { class: 'joblog' + (jobView.showGit ? '' : ' hide-git') });
+  jobView.follow = true;
+  jobView.log.addEventListener('scroll', () => {
+    const log = jobView.log;
+    jobView.follow = log.scrollHeight - log.scrollTop - log.clientHeight < 30;
+  });
+  jobView.details = null;
+  appendJobLines(job.lines);
+  renderCopy();
+  reveal('#job-card');
+  clearTimeout(jobView.timer);
+  if (job.status === 'running') jobView.timer = setTimeout(pollJob, 400);
+  else finishJob();
+}
+
+async function checkActiveJob() {
+  try {
+    const data = await api('GET', '/api/jobs/active');
+    if (!data.job || (cp.job && cp.job.id === data.job.id)) return;
+    const project = data.job.meta && data.job.meta.request && data.job.meta.request.project;
+    if (project && project !== cp.project && app.projects.some((p) => p.name === project)) await selectProject(project);
+    attachJob(data.job);
+  } catch (e) { /* сервер старой версии или недоступен */ }
+}
+
+function appendJobLines(lines) {
+  if (!lines || !lines.length) return;
+  const log = jobView.log;
+  const frag = document.createDocumentFragment();
+  for (const [t, level, text] of lines) {
+    frag.append(h('div', { class: 'ln ' + level }, h('span', { class: 't' }, t.toFixed(2).padStart(7)), text));
+    cp.job.lines.push([t, level, text]);
+  }
+  log.append(frag);
+  // Прокрутка вслед за логом, пока пользователь сам не отмотал вверх.
+  if (jobView.follow) requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
+}
+
+async function pollJob() {
+  const job = cp.job;
+  if (!job) return;
+  let info;
+  try {
+    info = await api('GET', `/api/jobs/${job.id}?since=${job.next}`);
+  } catch (e) {
+    if (cp.job !== job) return;
+    job.status = 'error'; job.error = e.message;
+    finishJob();
+    return;
+  }
+  if (cp.job !== job) return;
+  appendJobLines(info.lines);
+  delete info.lines;
+  Object.assign(job, info);
+  renderJob();
+  if (job.status === 'running') jobView.timer = setTimeout(pollJob, 500);
+  else finishJob();
+}
+
+async function finishJob() {
+  const job = cp.job;
+  cp.busy = false;
+  const req = Object.assign({}, (job.meta && job.meta.request) || {});
+  delete req.preview;
+  const same = req.project === cp.project;
+  if (job.status === 'done') {
+    if (job.meta.op === 'preview') {
+      if (same) { cp.preview = job.result; cp.previewSig = JSON.stringify(req); }
+    } else {
+      if (same) { cp.result = job.result; try { await loadExports(); } catch (e) { /* покажется при следующей загрузке */ } }
+      toast(`Готово: ${job.result.parts.length} ${plural(job.result.parts.length, 'часть', 'части', 'частей')}`);
+    }
+  } else if (job.status === 'cancelled') {
+    toast('Операция остановлена');
+  } else {
+    toast(job.error || 'ошибка', true);
+  }
+  if (jobView.details) jobView.details.open = job.status !== 'done';
+  renderCopy();
+  if (job.status === 'done') reveal(job.meta.op === 'preview' ? '#preview-card' : '#exports-card');
+}
+
+async function cancelJob() {
+  const job = cp.job;
+  if (!job) return;
+  try {
+    Object.assign(job, await api('POST', `/api/jobs/${job.id}/cancel`), { lines: job.lines });
   } catch (e) {
     toast(e.message, true);
-  } finally {
-    cp.busy = false;
   }
-  renderCopy();
-  reveal('#exports-card');
+  renderJob();
+}
+
+const JOB_STATUS = {
+  running: ['выполняется', 'accent'], done: ['готово', 'ok'], error: ['ошибка', 'err'], cancelled: ['остановлено', 'warn'],
+};
+
+function renderJob() {
+  const card = $('#job-card');
+  if (!card) return;
+  const job = cp.job;
+  if (!job) { card.hidden = true; return; }
+  card.hidden = false;
+  const running = job.status === 'running';
+  const [label, cls] = JOB_STATUS[job.status] || [job.status, ''];
+  const pct = job.total ? Math.min(100, Math.round((job.done / job.total) * 100)) : null;
+  const gitToggle = h('label', { class: 'check small muted', title: 'Показывать каждый вызов git с длительностью и объёмом вывода' },
+    h('input', {
+      type: 'checkbox', checked: jobView.showGit, onchange: (e) => {
+        jobView.showGit = e.target.checked; store.set('showGit', jobView.showGit);
+        jobView.log.classList.toggle('hide-git', !jobView.showGit);
+      },
+    }), 'вызовы git');
+  if (!jobView.details) {
+    jobView.details = h('details', { open: true }, h('summary', null, 'Лог'), jobView.log);
+  }
+  // Лог переносится в карточку только один раз: при повторной вставке браузер сбрасывает его прокрутку.
+  if (jobView.details.parentNode !== card) {
+    fill(card, h('div', { class: 'job-head' }), h('div', { class: 'job-body' }), jobView.details);
+  }
+  fill(jobView.details.querySelector('summary'), `Лог (${job.lines.length} ${plural(job.lines.length, 'строка', 'строки', 'строк')})`);
+  fill(card.querySelector('.job-head'),
+    h('div', { class: 'card-head' },
+      h('h3', null, job.title),
+      h('span', { class: 'badge ' + cls }, running ? spinner() : null, ' ', label),
+      h('span', { class: 'muted small' }, `${job.elapsed.toFixed(1)} с`),
+      h('span', { class: 'spacer' }),
+      gitToggle,
+      h('button', {
+        class: 'btn small', title: 'Скопировать лог целиком — например, чтобы разобраться, где тормозит', onclick: () =>
+          copyText(job.lines.map(([t, level, text]) => `[${t.toFixed(2).padStart(7)}] ${level === 'warn' || level === 'error' ? level.toUpperCase() + ': ' : ''}${text}`).join('\n'), 'Лог')
+            .then((ok) => { if (ok) toast('Лог в буфере'); }),
+      }, 'Копировать лог'),
+      running ? h('button', {
+        class: 'btn small danger', disabled: !job.cancellable || job.cancelling, onclick: cancelJob,
+        title: job.cancellable ? 'Прервать операцию: текущий вызов git будет остановлен, файлы выгрузки не изменятся' : 'Идёт запись результата — остановить уже нельзя',
+      }, job.cancelling ? 'Останавливается…' : 'Остановить')
+        : h('button', { class: 'btn small ghost', onclick: () => { cp.job = null; renderJob(); } }, 'Скрыть')));
+  fill(card.querySelector('.job-body'),
+    running && job.stage ? h('div', { class: 'job-stage' },
+      h('span', null, job.stage), pct !== null ? h('span', { class: 'muted small' }, ` ${job.done} / ${job.total}`) : null) : null,
+    running ? h('div', { class: 'progress' + (pct === null ? ' indeterminate' : '') },
+      h('div', { style: pct === null ? '' : `width:${pct}%` })) : null,
+    job.status === 'error' && job.error ? h('div', { class: 'alert err' }, job.error) : null);
 }
 
 function renderCopy() {
@@ -322,8 +464,10 @@ function renderCopy() {
   else body = renderProjectMode();
 
   fill(root, head, h('div', { class: 'row', style: 'margin-bottom:14px' }, modes), body,
+    h('div', { class: 'card', id: 'job-card', hidden: true }),
     renderPreview(), renderExports(), cp.mode === 'commits' ? h('div', { class: 'selbar', id: 'selbar' }) : null);
   if (cp.mode === 'commits') renderCommitRows();
+  renderJob();
   renderActions();
 }
 
@@ -348,7 +492,7 @@ function renderLast() {
 }
 
 function actionButtons() {
-  const disabled = cp.busy || (cp.mode === 'commits' && !cp.selected.size);
+  const disabled = cp.busy || (cp.job && cp.job.status === 'running') || (cp.mode === 'commits' && !cp.selected.size);
   return [
     h('button', { class: 'btn', disabled, onclick: doPreview }, cp.busy ? spinner() : null, 'Предпросмотр'),
     h('button', { class: 'btn primary', disabled, onclick: doCopy }, 'Скопировать'),
@@ -932,6 +1076,122 @@ async function restoreBackup(b) {
   }
 }
 
+/* ---------- Очистка ---------- */
+
+const cl = { items: [], dirs: {}, selected: new Set(), days: store.get('cleanDays', 7), busy: false };
+
+const AREAS = [
+  ['export', 'Выгрузки', 'Части, подготовленные на этой машине. Для каждого проекта хранится последний комплект каждого вида — удаляйте, когда части уже перенесены.'],
+  ['applied', 'Применённые пакеты', 'Файлы выгрузок, которые уже применены (inbox/applied).'],
+  ['discarded', 'Убранные из inbox', 'Пакеты, убранные кнопкой «Убрать из inbox» (inbox/discarded).'],
+  ['backups', 'Бэкапы применений', 'Прежние версии файлов для отката. После удаления бэкапа откатить это применение во вкладке «История» нельзя.'],
+];
+
+function itemKey(it) { return it.area + ':' + it.key; }
+
+async function loadStorage() {
+  const root = $('#clean-content');
+  if (!cl.items.length) fill(root, spinner());
+  try {
+    const data = await api('GET', '/api/storage');
+    cl.items = data.items; cl.dirs = data.dirs;
+    const keys = new Set(cl.items.map(itemKey));
+    for (const k of [...cl.selected]) if (!keys.has(k)) cl.selected.delete(k);
+    renderStorage();
+  } catch (e) {
+    fill(root, h('div', { class: 'alert err' }, e.message));
+  }
+}
+
+function selectedItems() { return cl.items.filter((it) => cl.selected.has(itemKey(it))); }
+
+function renderStorage() {
+  const root = $('#clean-content');
+  const sel = selectedItems();
+  const selBytes = sel.reduce((a, it) => a + it.bytes, 0);
+  const total = cl.items.reduce((a, it) => a + it.bytes, 0);
+  const days = h('input', { type: 'number', min: 0, max: 3650, class: 'num', value: cl.days, 'aria-label': 'дней' });
+  days.addEventListener('change', () => { cl.days = Math.max(0, parseInt(days.value, 10) || 0); store.set('cleanDays', cl.days); });
+  const selectOld = () => {
+    const limit = Date.now() / 1000 - cl.days * 86400;
+    cl.items.forEach((it) => { if (it.mtime < limit) cl.selected.add(itemKey(it)); });
+    renderStorage();
+  };
+  fill(root,
+    h('div', { class: 'card-head' }, h('h2', null, 'Очистка'),
+      h('span', { class: 'muted small' }, `всего ${cl.items.length} · ${fmtSize(total)}`),
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'btn ghost small', onclick: loadStorage }, 'Обновить')),
+    h('div', { class: 'card clean-bar' },
+      h('span', null, 'Отметить старше'), days, h('span', null, 'дн.'),
+      h('button', { class: 'btn small', onclick: selectOld }, 'Отметить'),
+      sel.length ? h('button', { class: 'btn ghost small', onclick: () => { cl.selected.clear(); renderStorage(); } }, 'Снять выбор') : null,
+      h('span', { class: 'spacer' }),
+      h('b', null, sel.length ? `Выбрано: ${sel.length} · ${fmtSize(selBytes)}` : 'Ничего не выбрано'),
+      h('button', { class: 'btn danger', disabled: !sel.length || cl.busy, onclick: deleteSelected }, cl.busy ? spinner() : null, 'Удалить выбранное')),
+    !cl.items.length ? h('div', { class: 'empty' }, 'Удалять нечего') : null,
+    AREAS.map(([area, title, hint]) => renderArea(area, title, hint)));
+}
+
+function renderArea(area, title, hint) {
+  const items = cl.items.filter((it) => it.area === area);
+  if (!items.length) return null;
+  const n = items.filter((it) => cl.selected.has(itemKey(it))).length;
+  const all = h('input', {
+    type: 'checkbox', checked: n === items.length, indeterminate: n > 0 && n < items.length, 'aria-label': 'выбрать все: ' + title,
+    onchange: (e) => { items.forEach((it) => (e.target.checked ? cl.selected.add(itemKey(it)) : cl.selected.delete(itemKey(it)))); renderStorage(); },
+  });
+  return h('div', { class: 'card' },
+    h('div', { class: 'card-head' }, all, h('h3', null, title),
+      h('span', { class: 'badge' }, `${items.length} · ${fmtSize(items.reduce((a, it) => a + it.bytes, 0))}`),
+      h('span', { class: 'muted small path' }, cl.dirs[area] || '')),
+    h('p', { class: 'muted small', style: 'margin:0 0 6px' }, hint),
+    h('div', { class: 'table-scroll' }, h('table', { class: 'history clean' },
+      h('tbody', null, items.map((it) => {
+        const k = itemKey(it);
+        const cb = h('input', { type: 'checkbox', checked: cl.selected.has(k), 'aria-label': 'выбрать ' + it.key });
+        const toggle = () => { if (cl.selected.has(k)) cl.selected.delete(k); else cl.selected.add(k); renderStorage(); };
+        cb.addEventListener('click', (e) => { e.stopPropagation(); toggle(); });
+        return h('tr', { class: cl.selected.has(k) ? 'selected' : '', onclick: toggle },
+          h('td', { class: 'cb' }, cb),
+          h('td', null, h('b', null, it.project || '—'),
+            h('div', { class: 'muted small mono' }, it.id || it.key)),
+          h('td', null, it.kind ? h('span', { class: 'badge ' + (it.kind === 'snapshot' ? 'accent' : 'ok') }, it.kind === 'snapshot' ? 'снимок' : 'изменения') : null,
+            it.restored_at ? h('span', { class: 'badge', style: 'margin-left:4px', title: it.restored_at }, 'откатан') : null),
+          h('td', { class: 'muted small' }, `${it.files} ${plural(it.files, 'файл', 'файла', 'файлов')}`),
+          h('td', null, fmtSize(it.bytes)),
+          h('td', { class: 'when muted small', title: fmtDate(it.mtime) }, fmtAgo(it.mtime)));
+      })))));
+}
+
+async function deleteSelected() {
+  const sel = selectedItems();
+  if (!sel.length) return;
+  const byArea = AREAS.map(([area, title]) => [title, sel.filter((it) => it.area === area)]).filter(([, l]) => l.length);
+  const backups = sel.filter((it) => it.area === 'backups' && !it.restored_at).length;
+  const body = h('div', null,
+    h('p', null, `Будет удалено безвозвратно (${fmtSize(sel.reduce((a, it) => a + it.bytes, 0))}):`),
+    h('ul', null, byArea.map(([title, l]) => h('li', null, `${title}: ${l.length}`))),
+    backups ? h('div', { class: 'alert warn' }, `Для ${backups} ${plural(backups, 'применения', 'применений', 'применений')} пропадёт возможность отката.`) : null);
+  if (!await modal('Удалить выбранное?', body, 'Удалить', true)) return;
+  cl.busy = true; renderStorage();
+  try {
+    const r = await api('POST', '/api/storage/delete', { items: sel.map((it) => ({ area: it.area, key: it.key })) });
+    r.removed.forEach((it) => cl.selected.delete(it.area + ':' + it.key));
+    if (r.errors.length) toast('Не удалось: ' + r.errors.join('; '), true);
+    else toast(`Удалено: ${r.removed.length}, освобождено ${fmtSize(r.bytes)}`);
+    if (cp.project && r.removed.some((it) => it.area === 'export')) {
+      cp.result = null;
+      loadExports().then(renderCopy, () => {});
+    }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    cl.busy = false;
+  }
+  loadStorage();
+}
+
 /* ---------- Старт ---------- */
 
 async function init() {
@@ -954,6 +1214,7 @@ async function init() {
   }
   switchTab(store.get('tab', 'copy'));
   loadInbox();
+  checkActiveJob();
 }
 
 init();

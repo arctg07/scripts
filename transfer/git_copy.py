@@ -14,7 +14,7 @@
 
 import time
 
-from . import TransferError, formats, gitutil, projects
+from . import TransferError, formats, gitutil, progress, projects
 
 MODE_EXEC = "100755"
 MODE_LINK = "120000"
@@ -50,9 +50,11 @@ def expand_refs(repo, refs):
 def plan_copy(repo, refs):
     """Что попадёт в выгрузку — без чтения содержимого файлов."""
     ordered = expand_refs(repo, refs)
+    progress.log("выбрано коммитов: %d" % len(ordered))
     latest = {}  # путь -> (коммит, статус, режим, blob)
     steps = []  # (коммит, [(статус, путь, режим, blob)])
-    for sha in ordered:
+    for i, sha in enumerate(ordered):
+        progress.step("Изменённые файлы коммитов", i, len(ordered))
         changes = gitutil.diff_tree_raw(repo, sha)
         steps.append((sha, changes))
         for status, path, mode, blob in changes:
@@ -96,7 +98,8 @@ def find_unselected(repo, ordered, paths):
     if len(candidates) > MAX_BETWEEN:
         return {"commits": [], "truncated": True, "count": len(candidates)}
     hits = []
-    for sha in candidates:
+    for i, sha in enumerate(candidates):
+        progress.step("Проверка невыбранных коммитов между выбранными", i, len(candidates))
         touched = sorted(set(gitutil.changed_paths(repo, sha)) & paths)
         if touched:
             hits.append((sha, touched))
@@ -116,7 +119,9 @@ def build_payload(repo, project, plan):
     for c in plan["commits"]:
         meta.append("COMMIT: %s %s" % (c["short"], c["subject"]))
     with gitutil.BlobReader(repo) as reader:
-        for f in plan["files"]:
+        for i, f in enumerate(plan["files"]):
+            if i % 50 == 0:
+                progress.step("Чтение файлов", i, len(plan["files"]))
             content = reader.read(f["blob"])
             if b"\x00" in content:
                 skipped.append({"path": f["path"], "reason": "бинарный"})
@@ -171,11 +176,16 @@ def copy_commits(cfg, project, refs):
     repo = projects.existing_project(cfg, project)
     if not gitutil.is_work_tree(repo):
         raise TransferError("проект %s — не git-репозиторий" % project)
+    progress.log("Проект %s: %s" % (project, repo))
     plan = plan_copy(repo, refs)
+    progress.log("файлов: %d, удалений: %d" % (len(plan["files"]), len(plan["deleted"])))
     payload, files, skipped = build_payload(repo, project, plan)
+    progress.log("выгрузка: %s, не переносится: %d" % (progress.fmt_size(len(payload)), len(skipped)))
     pkg_id = formats.new_package_id()
     parts = formats.make_parts("changes", project, pkg_id, payload, formats.sha256(payload), cfg.max_lines)
+    progress.no_cancel()
     written = formats.write_parts(cfg.export_dir, project, "changes", pkg_id, parts)
+    progress.log("записано частей: %d" % len(written))
     return {"kind": "changes", "project": project, "id": pkg_id, "parts": written,
             "commits": plan["commits"], "files": len(files), "deleted": len(plan["deleted"]),
             "skipped": skipped, "between": plan["between"]}
