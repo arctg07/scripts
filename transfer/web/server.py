@@ -93,7 +93,7 @@ class App(object):
     def state(self, **_):
         return {"version": VERSION, "projects_root": self.cfg.projects_root, "scripts_dir": self.cfg.scripts_dir,
                 "data_dir": self.cfg.data_dir, "inbox_dir": self.cfg.inbox_dir, "export_dir": self.cfg.export_dir,
-                "max_lines": self.cfg.max_lines, "history_commits": self.cfg.history_commits,
+                "max_part_bytes": self.cfg.max_part_bytes, "history_commits": self.cfg.history_commits,
                 "host": socket.gethostname()}
 
     def list_projects(self, **_):

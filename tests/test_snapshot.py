@@ -50,7 +50,7 @@ class SnapshotTest(TempEnv):
         return t
 
     def test_create_new_project(self):
-        self.cfg = self.make_cfg(max_lines=5)
+        self.cfg = self.make_cfg(max_part_bytes=600)
         result, blobs = self.snapshot_parts()
         self.assertEqual(result["mode"], "git")
         self.assertEqual(result["keep"], ["lib/tool.jar"])

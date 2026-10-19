@@ -6,9 +6,18 @@ from helpers import SCRIPTS_DIR  # noqa: F401 — добавляет scripts/ в
 from transfer import TransferError, formats
 
 
-def parts_for(payload, kind="changes", project="my project/ё", max_lines=5):
+PKG_ID = "2026-01-01_00-00-00-abcd"
+
+
+def limit_for(payload, body_bytes, kind="changes", project="my project/ё"):
+    """Лимит части, при котором на тело остаётся не меньше body_bytes."""
+    n = max(1, len(formats.split_lines(payload)))
+    return len(formats.make_header(kind, project, PKG_ID, n, n, n, "0" * 64)) + body_bytes
+
+
+def parts_for(payload, kind="changes", project="my project/ё", body_bytes=32):
     sha = formats.sha256(payload) if kind == "changes" else formats.sha256(formats.decode_base64(payload))
-    return formats.make_parts(kind, project, "2026-01-01_00-00-00-abcd", payload, sha, max_lines)
+    return formats.make_parts(kind, project, PKG_ID, payload, sha, limit_for(payload, body_bytes, kind, project))
 
 
 def scan_all(blobs):
@@ -38,13 +47,25 @@ class PartsTest(unittest.TestCase):
 
     def test_parts_respect_limit_and_assemble_in_any_order(self):
         parts = parts_for(self.payload)
-        self.assertEqual(len(parts), 6)  # 23 строки по 4 в части (+ заголовок = 5)
+        self.assertEqual(len(parts), 6)  # тело не больше 32 байт: по 4 строки «line N\n» в части
         for p in parts:
-            self.assertLessEqual(p.count(b"\n"), 5)
+            self.assertLessEqual(len(p), limit_for(self.payload, 32))
         random.Random(1).shuffle(parts)
         items = scan_all(parts)
         kind, data = formats.assemble_parts([i for i in items if i["type"] == "part"])
         self.assertEqual((kind, data), ("changes", self.payload))
+
+    def test_long_line_gets_own_part(self):
+        payload = b"a\n" + b"x" * 100 + b"\nb\nc\n"
+        parts = parts_for(payload, body_bytes=10)
+        self.assertEqual([p.split(b"\n", 1)[1] for p in parts], [b"a\n", b"x" * 100 + b"\n", b"b\nc\n"])
+        items = scan_all(parts)
+        self.assertEqual(formats.assemble_parts(items)[1], payload)
+
+    def test_empty_payload_is_one_part(self):
+        parts = parts_for(b"")
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(formats.assemble_parts(scan_all(parts))[1], b"")
 
     def test_several_parts_in_one_file(self):
         parts = parts_for(self.payload)
@@ -83,7 +104,7 @@ class PartsTest(unittest.TestCase):
         payload = (b"FILE: README.md\n```\n#@transfer v1 kind=changes project=x id=2026-09-25_14-00-00-a1b2 "
                    b"part=1/3 lines=6999 sha256=\xe2\x80\xa6\n#@transfer v1 kind=changes project=x id=y part=1/1 "
                    b"lines=500 sha256=" + b"ab" * 32 + b"\n```\n") + self.payload
-        parts = parts_for(payload, max_lines=100)
+        parts = parts_for(payload, body_bytes=10 ** 6)
         items = scan_all(parts)
         self.assertEqual([i["type"] for i in items], ["part"])
         self.assertEqual(formats.assemble_parts(items)[1], payload)
@@ -100,7 +121,7 @@ class PartsTest(unittest.TestCase):
 
     def test_snapshot_kind_decodes_base64(self):
         raw = bytes(range(256)) * 20
-        parts = parts_for(formats.encode_base64(raw), kind="snapshot", max_lines=8)
+        parts = parts_for(formats.encode_base64(raw), kind="snapshot", body_bytes=7 * 77)
         items = scan_all(parts)
         self.assertEqual(formats.assemble_parts([i for i in items if i["type"] == "part"]), ("snapshot", raw))
 

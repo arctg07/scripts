@@ -1247,7 +1247,7 @@ async function init() {
   try {
     app.state = await api('GET', '/api/state');
     $('#where').textContent = `${app.state.host} · ${app.state.projects_root}`;
-    $('#where').title = `inbox: ${app.state.inbox_dir}\nexport: ${app.state.export_dir}\nмакс. строк в части: ${app.state.max_lines}`;
+    $('#where').title = `inbox: ${app.state.inbox_dir}\nexport: ${app.state.export_dir}\nмакс. размер части: ${fmtSize(app.state.max_part_bytes)}`;
     await loadProjects();
   } catch (e) {
     toast(e.message, true);

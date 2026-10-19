@@ -73,7 +73,7 @@ class GitCopyApplyTest(TempEnv):
         self.assertEqual(inbox.scan(self.cfg), [])
 
     def test_small_parts(self):
-        self.cfg = self.make_cfg(max_lines=7)
+        self.cfg = self.make_cfg(max_part_bytes=400)
         result, package = self.copy_and_load(["%s..HEAD" % self.base])
         self.assertGreater(len(result["parts"]), 3)
         work = self.clone_at(self.src, "svc-work", self.base)

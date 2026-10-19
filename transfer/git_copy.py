@@ -182,7 +182,7 @@ def copy_commits(cfg, project, refs):
     payload, files, skipped = build_payload(repo, project, plan)
     progress.log("выгрузка: %s, не переносится: %d" % (progress.fmt_size(len(payload)), len(skipped)))
     pkg_id = formats.new_package_id()
-    parts = formats.make_parts("changes", project, pkg_id, payload, formats.sha256(payload), cfg.max_lines)
+    parts = formats.make_parts("changes", project, pkg_id, payload, formats.sha256(payload), cfg.max_part_bytes)
     progress.no_cancel()
     written = formats.write_parts(cfg.export_dir, project, "changes", pkg_id, parts)
     progress.log("записано частей: %d" % len(written))

@@ -80,7 +80,7 @@ def cmd_project_copy(cfg, args):
             print("  " + rel)
     print("Режим отбора: %s. Файлов: %d (%s), архив %s" % (
         result["mode"], result["files"], human_size(result["bytes"]), human_size(result["archive_bytes"])))
-    print("Результат (%d частей, максимум %d строк в каждой):" % (len(result["parts"]), cfg.max_lines))
+    print("Результат (%d частей, максимум %s в каждой):" % (len(result["parts"]), human_size(cfg.max_part_bytes)))
     print_parts(result)
 
 

@@ -16,8 +16,9 @@ SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DEFAULTS = {
     # None — родительский каталог папки scripts (она лежит в корне рядом с проектами).
     "projects_root": None,
-    # Максимум строк в одном файле-части, включая строку заголовка.
-    "max_lines": 7000,
+    # Максимальный размер одного файла-части в байтах, включая строку заголовка.
+    # codeshare.io молча теряет вставку больше ~1.5 МБ, поэтому по умолчанию 1 МБ с запасом.
+    "max_part_bytes": 1000000,
     "port": 8765,
     # Каталоги в корне, которые не показываются в списке проектов.
     "hidden_projects": [],
@@ -39,7 +40,7 @@ class Config(object):
         self.inbox_dir = os.path.join(data_dir, "inbox")
         self.export_dir = os.path.join(data_dir, "export")
         self.backups_dir = os.path.join(data_dir, "backups")
-        self.max_lines = max(10, int(data.get("max_lines") or DEFAULTS["max_lines"]))
+        self.max_part_bytes = max(1, int(data.get("max_part_bytes") or DEFAULTS["max_part_bytes"]))
         self.port = int(data.get("port") or DEFAULTS["port"])
         self.hidden_projects = set(data.get("hidden_projects") or [])
         self.aliases = dict(data.get("aliases") or {})
@@ -71,7 +72,7 @@ def load_config(scripts_dir=None):
     env = os.environ
     if env.get("TRANSFER_PROJECTS_ROOT"):
         data["projects_root"] = env["TRANSFER_PROJECTS_ROOT"]
-    if env.get("TRANSFER_MAX_LINES"):
-        data["max_lines"] = int(env["TRANSFER_MAX_LINES"])
+    if env.get("TRANSFER_MAX_PART_BYTES"):
+        data["max_part_bytes"] = int(env["TRANSFER_MAX_PART_BYTES"])
     data_dir = os.path.abspath(os.path.expanduser(env.get("TRANSFER_DATA_DIR") or scripts_dir))
     return Config(data, scripts_dir, data_dir)

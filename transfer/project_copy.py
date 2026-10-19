@@ -135,7 +135,7 @@ def copy_project(cfg, project, with_binaries=False, history_limit=None):
     pkg_id = formats.new_package_id()
     with progress.timed("base64 и разбиение на части"):
         payload = formats.encode_base64(archive)
-        parts = formats.make_parts("snapshot", project, pkg_id, payload, formats.sha256(archive), cfg.max_lines)
+        parts = formats.make_parts("snapshot", project, pkg_id, payload, formats.sha256(archive), cfg.max_part_bytes)
     progress.no_cancel()
     written = formats.write_parts(cfg.export_dir, project, "snapshot", pkg_id, parts)
     progress.log("записано частей: %d в %s" % (len(written), os.path.dirname(written[0]["path"])))

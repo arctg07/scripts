@@ -55,7 +55,7 @@ def tree(root, skip=(".git",)):
 class TempEnv(unittest.TestCase):
     """Корень проектов и каталог данных во временной папке; git с собственной идентичностью."""
 
-    max_lines = 7000
+    max_part_bytes = 1000000
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="transfer-test-")
@@ -80,7 +80,7 @@ class TempEnv(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def make_cfg(self, **overrides):
-        data = dict(DEFAULTS, projects_root=self.root, max_lines=self.max_lines)
+        data = dict(DEFAULTS, projects_root=self.root, max_part_bytes=self.max_part_bytes)
         data.update(overrides)
         return Config(data, SCRIPTS_DIR, self.data)
 

@@ -87,11 +87,25 @@ def split_lines(data):
     return lines
 
 
-def make_parts(kind, project, pkg_id, payload, sha, max_lines):
-    """Режет нагрузку (bytes, заканчивается на \\n) на части с заголовками. Возвращает список bytes."""
-    body_max = max(1, max_lines - 1)
+def make_parts(kind, project, pkg_id, payload, sha, max_bytes):
+    """Режет нагрузку (bytes, заканчивается на \\n) на части с заголовками. Возвращает список bytes.
+
+    Часть вместе с заголовком не больше max_bytes; режется по границам строк, поэтому строка длиннее
+    лимита уходит в отдельную часть целиком.
+    """
     lines = [line + b"\n" for line in split_lines(payload)]
-    chunks = [lines[i:i + body_max] for i in range(0, len(lines), body_max)] or [[]]
+    # Номер части и число строк не больше числа строк — заголовок с ними не короче настоящего.
+    n = max(1, len(lines))
+    body_max = max_bytes - len(make_header(kind, project, pkg_id, n, n, n, sha))
+    chunks, chunk, size = [], [], 0
+    for line in lines:
+        if chunk and size + len(line) > body_max:
+            chunks.append(chunk)
+            chunk, size = [], 0
+        chunk.append(line)
+        size += len(line)
+    if chunk or not chunks:
+        chunks.append(chunk)
     total = len(chunks)
     return [make_header(kind, project, pkg_id, i + 1, total, len(chunk), sha) + b"".join(chunk)
             for i, chunk in enumerate(chunks)]
