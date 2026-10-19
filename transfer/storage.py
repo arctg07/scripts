@@ -49,6 +49,12 @@ def _header(path):
         return None
 
 
+def export_key(project_dir, name):
+    """Ключ записи export для файла части: по нему удаляется весь комплект."""
+    m = _PART_RE.match(name)
+    return project_dir + "/" + (m.group("prefix") if m else name)
+
+
 def _export_items(root):
     items = []
     for project_dir in _dirs(root):

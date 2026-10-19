@@ -187,6 +187,17 @@ def save_text(cfg, data, name=None):
     return os.path.basename(path)
 
 
+def delete_package(cfg, p):
+    """Удаляет файлы пакета из inbox безвозвратно (только лежащие прямо в inbox/)."""
+    removed = []
+    for path in sorted(p["paths"]):
+        if os.path.dirname(os.path.abspath(path)) != os.path.abspath(cfg.inbox_dir) or not os.path.isfile(path):
+            continue
+        os.remove(path)
+        removed.append(os.path.basename(path))
+    return removed
+
+
 def move_package(cfg, p, sub):
     """Переносит файлы пакета в inbox/<sub>/<время>-<id>/ (applied или discarded)."""
     dest = os.path.join(cfg.inbox_dir, sub, "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"),

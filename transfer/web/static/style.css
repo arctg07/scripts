@@ -213,6 +213,10 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent);
 .packages li:hover { border-color: var(--accent); }
 .packages li.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .packages .title { font-weight: 600; display: flex; gap: 8px; align-items: center; }
+.packages .title .del { margin: -3px -6px -3px 0; opacity: 0; }
+.packages li:hover .title .del, .packages li.active .title .del, .packages .title .del:focus { opacity: 1; }
+.btn.ghost.del:hover { color: var(--err); background: var(--err-soft); }
+@media (hover: none) { .packages .title .del { opacity: 1; } }
 .packages .sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
 
 .kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px 14px; font-size: 13px; }

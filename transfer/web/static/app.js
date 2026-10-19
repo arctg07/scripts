@@ -683,7 +683,11 @@ function renderExports() {
       ' Скопируйте каждую часть и вставьте на другой машине во вкладке «Применить».') : null,
     [...groups.values()].map((g) => h('div', { style: 'margin-top:8px' },
       h('div', { class: 'row' }, h('span', { class: 'badge ' + (g.kind === 'snapshot' ? 'accent' : 'ok') }, g.kind === 'snapshot' ? 'снимок' : 'изменения'),
-        h('span', { class: 'muted small' }, g.id || '')),
+        h('span', { class: 'muted small' }, g.id || ''),
+        h('span', { class: 'spacer' }),
+        g.files[0].storage_key ? h('button', {
+          class: 'btn ghost small del', title: 'Удалить файлы этой выгрузки из export/', onclick: () => deleteExport(g),
+        }, 'Удалить') : null),
       h('ul', { class: 'parts' }, g.files.map((f) => {
         const key = f.project_dir + '/' + f.name + ':' + f.mtime;
         const load = () => {
@@ -712,6 +716,22 @@ function renderExports() {
           h('span', { class: 'badge' }, `часть ${f.part || '?'}`),
           h('span', { class: 'muted small' }, fmtSize(f.bytes)), btn);
       })))));
+}
+
+async function deleteExport(g) {
+  const bytes = g.files.reduce((a, f) => a + f.bytes, 0);
+  const what = g.kind === 'snapshot' ? 'снимка' : 'выгрузки изменений';
+  if (!await modal('Удалить выгрузку?', `Файлы ${what} ${g.id || ''} (${g.files.length} ${plural(g.files.length, 'часть', 'части', 'частей')}, ${fmtSize(bytes)}) будут удалены из export/.`, 'Удалить', true)) return;
+  try {
+    const r = await api('POST', '/api/storage/delete', { items: [{ area: 'export', key: g.files[0].storage_key }] });
+    if (r.errors.length) throw new Error(r.errors.join('; '));
+    if (cp.result && cp.result.id === g.id) cp.result = null;
+    toast(`Удалено, освобождено ${fmtSize(r.bytes)}`);
+    await loadExports();
+  } catch (e) {
+    toast(e.message, true);
+  }
+  renderCopy();
 }
 
 /* ---------- Применение ---------- */
@@ -770,7 +790,12 @@ function renderPackages() {
     return h('li', { class: p.key === ap.key ? 'active' : '', onclick: () => selectPackage(p.key) },
       h('div', { class: 'title' },
         h('span', { class: 'badge ' + (p.kind === 'snapshot' ? 'accent' : p.kind ? 'ok' : '') }, p.kind === 'snapshot' ? 'снимок' : p.kind ? 'изменения' : '?'),
-        h('span', null, p.project || '(проект не указан)')),
+        h('span', null, p.project || '(проект не указан)'),
+        h('span', { class: 'spacer' }),
+        h('button', {
+          class: 'btn ghost small del', title: 'Удалить файлы пакета из inbox',
+          onclick: (e) => { e.stopPropagation(); deletePackage(p); },
+        }, 'Удалить')),
       h('div', { class: 'sub' },
         h('span', { class: 'badge ' + cls }, label), ' ',
         `частей ${p.parts_present.length}/${p.parts_total}`, p.legacy ? ' · старый формат' : '', ' · ', fmtAgo(p.mtime)));
@@ -844,7 +869,8 @@ function renderApply() {
         h('div', { class: 'options', id: 'apply-options' }),
         h('div', { class: 'row', id: 'apply-actions' })],
       h('div', { class: 'row', style: 'margin-top:8px' }, h('span', { class: 'spacer' }),
-        h('button', { class: 'btn ghost small', onclick: discardPackage }, 'Убрать из inbox'))),
+        h('button', { class: 'btn ghost small', onclick: discardPackage, title: 'Перенести файлы в inbox/discarded' }, 'Убрать из inbox'),
+        h('button', { class: 'btn ghost small del', onclick: () => deletePackage(p) }, 'Удалить'))),
     h('div', { id: 'apply-report' }));
   renderTargetBadge();
   renderApplyTail();
@@ -983,6 +1009,20 @@ async function discardPackage() {
   try {
     const data = await api('POST', '/api/inbox/discard', { key: p.key });
     ap.key = null;
+    setPackages(data.packages);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function deletePackage(p) {
+  const body = h('div', null, h('p', null, `Файлы пакета будут удалены безвозвратно (в inbox/discarded не переносятся):`),
+    h('ul', { class: 'file-list' }, p.files.map((f) => h('li', null, f))));
+  if (!await modal('Удалить из inbox?', body, 'Удалить', true)) return;
+  try {
+    const data = await api('POST', '/api/inbox/delete', { key: p.key });
+    if (ap.key === p.key) ap.key = null;
+    toast(`Удалено файлов: ${data.removed.length}`);
     setPackages(data.packages);
   } catch (e) {
     toast(e.message, true);

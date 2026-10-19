@@ -117,6 +117,23 @@ class WebTest(TempEnv):
         self.assertEqual((status, len(result["removed"])), (200, 1))
         self.assertEqual(self.request("GET", "/api/projects/svc/exports")[1]["files"], [])
 
+    def test_delete_export_and_inbox_package(self):
+        status, result = self.request("POST", "/api/copy", {"project": "svc", "mode": "last", "ref": "main"})
+        self.assertEqual(status, 200, result)
+        files = self.request("GET", "/api/projects/svc/exports")[1]["files"]
+        self.assertEqual(len(files), 1)
+        status, text = self.request("GET", "/api/export/%s/%s" % (files[0]["project_dir"], files[0]["name"]))
+        status, saved = self.request("POST", "/api/inbox", {"text": text.decode()})
+        status, deleted = self.request("POST", "/api/storage/delete",
+                                       {"items": [{"area": "export", "key": files[0]["storage_key"]}]})
+        self.assertEqual((status, len(deleted["removed"])), (200, 1))
+        self.assertEqual(self.request("GET", "/api/projects/svc/exports")[1]["files"], [])
+
+        key = saved["packages"][0]["key"]
+        status, data = self.request("POST", "/api/inbox/delete", {"key": key})
+        self.assertEqual((status, data["removed"], data["packages"]), (200, [saved["saved"]], []))
+        self.assertEqual(self.request("POST", "/api/inbox/delete", {"key": key})[0], 400)
+
     def test_errors_are_json(self):
         status, body = self.request("GET", "/api/projects/nope/branches")
         self.assertEqual(status, 400)

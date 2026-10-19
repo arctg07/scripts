@@ -70,6 +70,7 @@ class App(object):
         route("GET", r"/api/inbox", self.inbox_list)
         route("POST", r"/api/inbox", self.inbox_add)
         route("POST", r"/api/inbox/discard", self.inbox_discard)
+        route("POST", r"/api/inbox/delete", self.inbox_delete)
         route("POST", r"/api/apply", self.apply)
         route("GET", r"/api/backups", self.backups)
         route("POST", r"/api/backups/restore", self.restore)
@@ -146,7 +147,8 @@ class App(object):
                     items.append({"name": name, "project_dir": formats.safe_file_part(p), "path": path,
                                   "bytes": os.path.getsize(path), "mtime": os.path.getmtime(path),
                                   "kind": hdr and hdr["kind"], "id": hdr and hdr["id"],
-                                  "part": hdr and "%d/%d" % (hdr["index"], hdr["total"])})
+                                  "part": hdr and "%d/%d" % (hdr["index"], hdr["total"]),
+                                  "storage_key": storage.export_key(formats.safe_file_part(p), name)})
         return {"dir": d, "files": items}
 
     # --- Копирование -----------------------------------------------------------------------------
@@ -220,6 +222,16 @@ class App(object):
         package = inbox.load(self.cfg, body.get("key"))
         moved = inbox.move_package(self.cfg, package, inbox.DISCARDED)
         return {"moved": moved, "packages": inbox.scan(self.cfg)}
+
+    def inbox_delete(self, body, **_):
+        package = inbox.load(self.cfg, body.get("key"))
+        if not service.LOCK.acquire(False):
+            raise ApiError(409, "идёт другая операция — дождитесь окончания")
+        try:
+            removed = inbox.delete_package(self.cfg, package)
+        finally:
+            service.LOCK.release()
+        return {"removed": removed, "packages": inbox.scan(self.cfg)}
 
     def apply(self, body, **_):
         package = inbox.load(self.cfg, body.get("key"))
